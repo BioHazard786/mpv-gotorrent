@@ -75,7 +75,9 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/stream", s.handleStream)
+	mux.HandleFunc("/stream/", s.handleStream)
 	mux.HandleFunc("/sub", s.handleSubtitle)
+	mux.HandleFunc("/sub/", s.handleSubtitle)
 	mux.HandleFunc("/playlist", s.handlePlaylist)
 	mux.HandleFunc("/meta", s.handleMeta)
 	mux.HandleFunc("/status", s.handleStatus)
@@ -139,10 +141,24 @@ func (s *Server) Stop() error {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	fileIdxStr := r.URL.Query().Get("file")
-	fileIdx, err := strconv.Atoi(fileIdxStr)
+	var fileIdx int
+	var err error
+
+	if strings.HasPrefix(r.URL.Path, "/stream/") {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/stream/")
+		parts := strings.Split(trimmed, "/")
+		if len(parts) > 0 && parts[0] != "" {
+			fileIdx, err = strconv.Atoi(parts[0])
+		} else {
+			err = fmt.Errorf("missing file index in path")
+		}
+	} else {
+		fileIdxStr := r.URL.Query().Get("file")
+		fileIdx, err = strconv.Atoi(fileIdxStr)
+	}
+
 	if err != nil {
-		slog.Warn("invalid stream request", "query", r.URL.RawQuery)
+		slog.Warn("invalid stream request", "path", r.URL.Path, "query", r.URL.RawQuery)
 		http.Error(w, "invalid or missing file query param", http.StatusBadRequest)
 		return
 	}
@@ -210,8 +226,22 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
-	fileIdxStr := r.URL.Query().Get("file")
-	fileIdx, err := strconv.Atoi(fileIdxStr)
+	var fileIdx int
+	var err error
+
+	if strings.HasPrefix(r.URL.Path, "/sub/") {
+		trimmed := strings.TrimPrefix(r.URL.Path, "/sub/")
+		parts := strings.Split(trimmed, "/")
+		if len(parts) > 0 && parts[0] != "" {
+			fileIdx, err = strconv.Atoi(parts[0])
+		} else {
+			err = fmt.Errorf("missing subtitle index in path")
+		}
+	} else {
+		fileIdxStr := r.URL.Query().Get("file")
+		fileIdx, err = strconv.Atoi(fileIdxStr)
+	}
+
 	if err != nil {
 		http.Error(w, "invalid file parameter", http.StatusBadRequest)
 		return

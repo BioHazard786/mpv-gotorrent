@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -158,7 +159,7 @@ func main() {
 	if len(videoFiles) > 0 {
 		firstStream = videoFiles[0].StreamURL
 	} else if len(allFiles) > 0 {
-		firstStream = srv.BaseURL() + "/stream?file=0"
+		firstStream = fmt.Sprintf("%s/stream/0/%s", srv.BaseURL(), url.PathEscape(allFiles[0].Name))
 	}
 
 	banner := ReadyBanner{

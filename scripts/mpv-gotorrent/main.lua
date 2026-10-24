@@ -19,9 +19,9 @@ local opts = {
     show_osd = true,            -- Show OSD messages on loading
     osd_duration = 3,           -- Seconds to display loading notices
 
-    -- Advanced ASS Text Styling (inspired by stats.lua & webtorrent.node.ts)
-    font = "monospace",
-    font_size = 18,
+    -- Advanced ASS Text Styling (uses mpv default font and larger size as requested)
+    font = "",                  -- Blank = use mpv default font (no monospace)
+    font_size = 22,             -- Increased font size
     font_color = "FFFFFF",      -- White main text (BGR hex)
     border_size = 1.2,
     border_color = "151515",    -- Dark border
@@ -33,12 +33,29 @@ local opts = {
 options.read_options(opts, "gotorrent")
 
 local current_server = nil      -- active companion metadata { port, base_url, pid, cmd_id }
-local active_torrent = nil      -- active torrent metadata { name, infohash, videos }
+local active_torrent = nil      -- active torrent metadata { name, infohash, videos, source }
 local is_windows = package.config:sub(1,1) == "\\"
 
 local osd_overlay = nil
 local osd_timer = nil
 local osd_active = false
+
+local last_torrent_title = nil  -- remembered clean title for history logging
+local last_torrent_source = nil -- remembered clean magnet/source for history logging
+
+-- Decode URL percent-encoding (e.g. %20 -> space)
+local function urldecode(s)
+    if not s then return "" end
+    return s:gsub("+", " "):gsub("%%(%x%x)", function(h)
+        return string.char(tonumber(h, 16))
+    end)
+end
+
+-- Strip common file extensions (.mkv, .mp4, etc.)
+local function strip_extension(filename)
+    if not filename or filename == "" then return "" end
+    return (filename:gsub("%.%w+$", ""))
+end
 
 -- Extract clean torrent source (stripping any cwd prepended by mpv)
 local function extract_torrent_source(url)
@@ -160,25 +177,147 @@ end
 -- Update track titles and subtitles on track changes
 local function update_track_metadata()
     if not active_torrent or not active_torrent.videos then return end
-    local current_path = mp.get_property("path", "")
     local current_pos = mp.get_property_number("playlist-pos", 0)
+    local v = active_torrent.videos[current_pos + 1]
+    if not v then return end
 
-    for _, v in ipairs(active_torrent.videos) do
-        if v.stream_url == current_path then
-            mp.set_property("force-media-title", v.name)
-            mp.set_property("title", v.name)
-            pcall(function()
-                mp.set_property(string.format("playlist/%d/title", current_pos), v.name)
-            end)
-            if v.subtitles then
-                for _, sub in ipairs(v.subtitles) do
-                    mp.commandv("sub-add", sub.download_url, "auto", sub.name)
-                end
-            end
-            break
+    local clean_title = strip_extension(v.name)
+    mp.set_property("force-media-title", clean_title)
+    mp.set_property("title", clean_title)
+    pcall(function()
+        mp.set_property(string.format("playlist/%d/title", current_pos), clean_title)
+    end)
+
+    if v.subtitles then
+        for _, sub in ipairs(v.subtitles) do
+            mp.commandv("sub-add", sub.download_url, "auto", sub.name)
         end
     end
 end
+
+-- Ensure title bar never reverts to magnet link during video playback (e.g. from modernx or playlistmanager)
+local function reaffirm_title()
+    if not active_torrent or not active_torrent.videos then return end
+    local current_pos = mp.get_property_number("playlist-pos", 0)
+    local v = active_torrent.videos[current_pos + 1]
+    if v then
+        local clean_title = strip_extension(v.name)
+        mp.set_property("force-media-title", clean_title)
+        mp.set_property("title", clean_title)
+    end
+end
+
+mp.observe_property("media-title", "string", function(name, val)
+    if not val or val == "" or val:match("^magnet:") or val:match("/magnet:") or val:match("^https?://127%.0%.0%.1") then
+        reaffirm_title()
+    end
+end)
+
+mp.observe_property("title", "string", function(name, val)
+    if not val or val == "" or val:match("^magnet:") or val:match("/magnet:") or val:match("^https?://127%.0%.0%.1") then
+        reaffirm_title()
+    end
+end)
+
+-- Sanitize SimpleHistory log file (mpvHistory.log)
+-- Ensures lines contain clean titles without extension and clean magnet URIs for instant reopening.
+local function sanitize_history_log()
+    local log_paths = {}
+
+    local conf = mp.find_config_file("mpvHistory.log")
+    if conf then table.insert(log_paths, conf) end
+
+    local conf_dir = mp.find_config_file(".")
+    if conf_dir then
+        table.insert(log_paths, utils.join_path(conf_dir, "mpvHistory.log"))
+    end
+
+    local home = os.getenv("HOME") or os.getenv("USERPROFILE") or ""
+    if home ~= "" then
+        table.insert(log_paths, utils.join_path(home, ".config/mpv/mpvHistory.log"))
+        local appdata = os.getenv("APPDATA")
+        if appdata and appdata ~= "" then
+            table.insert(log_paths, utils.join_path(appdata, "mpv/mpvHistory.log"))
+        end
+    end
+
+    local target_log = nil
+    for _, p in ipairs(log_paths) do
+        local stat = utils.file_info(p)
+        if stat and stat.is_file then
+            target_log = p
+            break
+        end
+    end
+
+    if not target_log then return end
+
+    local f = io.open(target_log, "r")
+    if not f then return end
+    local lines = {}
+    local modified = false
+
+    for line in f:lines() do
+        local new_line = line
+        local has_magnet = line:match("(magnet:%?[^%s|]+)")
+        local has_stream = line:match("(https?://127%.0%.0%.1:%d+/stream/[^%s|]+)") or line:match("(https?://127%.0%.0%.1:%d+/stream%?[^%s|]+)")
+
+        if has_magnet or has_stream then
+            local date_part = line:match("^(%[[^%]]+%])")
+            local title_part = line:match('^%[[^%]]+%]%s*"(.-)"')
+            local length_part = line:match("(length=[%d%.]+)")
+            local time_part = line:match("(time=[%d%.]+)")
+
+            local clean_magnet = has_magnet
+            if not clean_magnet then
+                clean_magnet = last_torrent_source or (active_torrent and active_torrent.source)
+                if not clean_magnet and active_torrent and active_torrent.infohash then
+                    clean_magnet = "magnet:?xt=urn:btih:" .. active_torrent.infohash
+                end
+            end
+
+            local clean_title = title_part
+            if not clean_title or clean_title == "" or clean_title == "Torrent Stream" or clean_title:match("^magnet:") then
+                if last_torrent_title and last_torrent_title ~= "" then
+                    clean_title = last_torrent_title
+                elseif active_torrent and active_torrent.name then
+                    clean_title = strip_extension(active_torrent.name)
+                elseif clean_magnet and clean_magnet:match("[?&]dn=([^&]+)") then
+                    local dn = clean_magnet:match("[?&]dn=([^&]+)")
+                    clean_title = strip_extension(urldecode(dn))
+                elseif has_stream then
+                    local stem = has_stream:match(".+/(.+)") or ""
+                    clean_title = strip_extension(urldecode(stem))
+                end
+            else
+                clean_title = strip_extension(clean_title)
+            end
+
+            if date_part and clean_magnet and length_part and time_part then
+                new_line = string.format('%s "%s" | %s | %s | %s', date_part, clean_title or "Torrent Stream", clean_magnet, length_part, time_part)
+                if new_line ~= line then
+                    modified = true
+                end
+            end
+        end
+        table.insert(lines, new_line)
+    end
+    f:close()
+
+    if modified then
+        local wf = io.open(target_log, "w")
+        if wf then
+            for _, l in ipairs(lines) do
+                wf:write(l .. "\n")
+            end
+            wf:close()
+            msg.info("Sanitized SimpleHistory log (" .. target_log .. ") for clean torrent stream reopening")
+        end
+    end
+end
+
+-- Perform initial history log hygiene on load
+sanitize_history_log()
 
 -- Terminate previous companion server if running
 local function stop_active_companion()
@@ -299,6 +438,7 @@ mp.add_hook("on_load", 10, function()
         total_size = ready_data.total_size,
         videos = ready_data.videos or {},
         videos_count = ready_data.videos_count or 0,
+        source = source,
     }
 
     local videos = active_torrent.videos
@@ -312,12 +452,15 @@ mp.add_hook("on_load", 10, function()
     -- Redirect current stream to local HTTP endpoint
     mp.set_property("stream-open-filename", first_stream)
 
-    -- Explicitly set clean media title and playlist title
-    local display_title = (videos[1] and videos[1].name) or ready_data.name or "Torrent Stream"
-    mp.set_property("force-media-title", display_title)
-    mp.set_property("title", display_title)
+    -- Explicitly set clean media title and playlist title without extension
+    local raw_title = (videos[1] and videos[1].name) or ready_data.name or "Torrent Stream"
+    local clean_title = strip_extension(raw_title)
+    last_torrent_title = clean_title
+    last_torrent_source = source
+    mp.set_property("force-media-title", clean_title)
+    mp.set_property("title", clean_title)
     pcall(function()
-        mp.set_property("playlist/0/title", display_title)
+        mp.set_property("playlist/0/title", clean_title)
     end)
 
     -- Auto-Playlist Mode (Default as requested)
@@ -326,9 +469,10 @@ mp.add_hook("on_load", 10, function()
         msg.info(string.format("Multi-file torrent detected (%d videos). Loading sequentially into playlist.", #videos))
         for i = 2, #videos do
             local v = videos[i]
+            local item_title = strip_extension(v.name)
             mp.commandv("loadfile", v.stream_url, "append")
             pcall(function()
-                mp.set_property(string.format("playlist/%d/title", i - 1), v.name)
+                mp.set_property(string.format("playlist/%d/title", i - 1), item_title)
             end)
         end
         if opts.show_osd then
@@ -336,7 +480,7 @@ mp.add_hook("on_load", 10, function()
         end
     else
         if opts.show_osd then
-            mp.osd_message("Streaming: " .. display_title, 3)
+            mp.osd_message("Streaming: " .. clean_title, 3)
         end
     end
 
@@ -351,7 +495,18 @@ end)
 
 -- Event hooks to ensure title bar and playlist stay clean during playback & track transitions
 mp.register_event("start-file", update_track_metadata)
-mp.register_event("file-loaded", update_track_metadata)
+mp.register_event("file-loaded", function()
+    update_track_metadata()
+    -- Reaffirm clean title after modernx / playlistmanager file-loaded handlers finish
+    mp.add_timeout(0.1, reaffirm_title)
+    mp.add_timeout(0.5, reaffirm_title)
+    -- Allow SimpleHistory to log, then sanitize entry
+    mp.add_timeout(0.3, sanitize_history_log)
+end)
+
+mp.register_event("end-file", function()
+    sanitize_history_log()
+end)
 
 -- Refresh and render ASS styled OSD overlay (webtorrent / stats.lua style)
 local function refresh_osd_overlay()
@@ -377,10 +532,11 @@ local function refresh_osd_overlay()
         osd_overlay = mp.create_osd_overlay("ass-events")
     end
 
+    local font_clause = (opts.font and opts.font ~= "") and string.format("\\fn%s", opts.font) or ""
     local style_header = string.format(
-        "{\\r\\an7\\fs%d\\fn%s\\bord%.1f\\3c&H%s&\\1c&H%s&\\4c&H%s&}",
+        "{\\r\\an7\\fs%d%s\\bord%.1f\\3c&H%s&\\1c&H%s&\\4c&H%s&}",
         opts.font_size,
-        opts.font,
+        font_clause,
         opts.border_size,
         opts.border_color,
         opts.font_color,
@@ -418,7 +574,7 @@ local function refresh_osd_overlay()
     osd_overlay:update()
 end
 
--- Toggle OSD Overlay on/off (Key: 'T')
+-- Toggle OSD Overlay on/off (Key: 'P')
 local function toggle_stats_overlay()
     if not current_server or not current_server.base_url then
         mp.osd_message("mpv-gotorrent: Not currently streaming a torrent.", 2)
@@ -436,9 +592,10 @@ local function toggle_stats_overlay()
     end
 end
 
-mp.add_key_binding("T", "gotorrent-stats", toggle_stats_overlay)
+mp.add_key_binding("P", "gotorrent-stats", toggle_stats_overlay)
 
 -- Cleanup on mpv shutdown
 mp.register_event("shutdown", function()
+    sanitize_history_log()
     stop_active_companion()
 end)

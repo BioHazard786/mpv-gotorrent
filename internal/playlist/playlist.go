@@ -1,6 +1,8 @@
 package playlist
 
 import (
+	"fmt"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -105,7 +107,8 @@ func ParseFiles(files []*torrent.File, baseURL string) ([]FileItem, []FileItem) 
 
 	// Associate subtitles with video files
 	for i := range videoFiles {
-		videoFiles[i].StreamURL = baseURL + "/stream?file=" + strconv.Itoa(videoFiles[i].Index)
+		encodedName := url.PathEscape(videoFiles[i].Name)
+		videoFiles[i].StreamURL = fmt.Sprintf("%s/stream/%d/%s", baseURL, videoFiles[i].Index, encodedName)
 		videoFiles[i].Subtitles = findMatchingSubtitles(videoFiles[i], subFiles, baseURL)
 	}
 
@@ -134,11 +137,12 @@ func findMatchingSubtitles(video FileItem, subs []FileItem, baseURL string) []Su
 		// Check similarity or if this is the only video / only sub
 		if strings.HasPrefix(strings.ToLower(subStem), strings.ToLower(videoStem)) || len(subs) == 1 {
 			lang := extractLanguage(subStem)
+			encodedSubName := url.PathEscape(sub.Name)
 			matched = append(matched, SubtitleItem{
 				Index:       sub.Index,
 				Name:        sub.Name,
 				Language:    lang,
-				DownloadURL: baseURL + "/sub?file=" + strconv.Itoa(sub.Index),
+				DownloadURL: fmt.Sprintf("%s/sub/%d/%s", baseURL, sub.Index, encodedSubName),
 			})
 		}
 	}
