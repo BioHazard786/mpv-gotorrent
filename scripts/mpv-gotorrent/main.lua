@@ -16,8 +16,18 @@ local opts = {
     keep_files = false,         -- Keep downloaded files on exit (default false = auto cleanup)
     timeout = 60,               -- Metadata resolution timeout in seconds
     auto_playlist = true,       -- Auto-playlist mode for multi-file torrents (default: true)
-    show_osd = true,            -- Show OSD messages on loading and stats
+    show_osd = true,            -- Show OSD messages on loading
     osd_duration = 3,           -- Seconds to display loading notices
+
+    -- Advanced ASS Text Styling (inspired by stats.lua & webtorrent.node.ts)
+    font = "monospace",
+    font_size = 18,
+    font_color = "FFFFFF",      -- White main text (BGR hex)
+    border_size = 1.2,
+    border_color = "151515",    -- Dark border
+    shadow_color = "000000",
+    accent_color = "00F0FF",    -- Cyan accent (BGR hex: 00F0FF)
+    progress_color = "33FF66",  -- Green accent (BGR hex: 33FF66)
 }
 
 options.read_options(opts, "gotorrent")
@@ -26,7 +36,10 @@ local current_server = nil      -- active companion metadata { port, base_url, p
 local active_torrent = nil      -- active torrent metadata { name, infohash, videos }
 local is_windows = package.config:sub(1,1) == "\\"
 
--- Check if input string is a torrent source
+local osd_overlay = nil
+local osd_timer = nil
+local osd_active = false
+
 -- Extract clean torrent source (stripping any cwd prepended by mpv)
 local function extract_torrent_source(url)
     if not url or url == "" then return nil end
@@ -118,8 +131,58 @@ local function format_speed(bytes_per_sec)
     return format_bytes(bytes_per_sec) .. "/s"
 end
 
+-- Generate ASCII/Unicode progress bar
+local function format_progress_bar(pct, length)
+    length = length or 22
+    pct = pct or 0
+    local filled = math.floor((pct / 100.0) * length)
+    if filled > length then filled = length end
+    if filled < 0 then filled = 0 end
+    local bar = string.rep("=", filled)
+    if filled < length then
+        bar = bar .. ">" .. string.rep("-", length - filled - 1)
+    end
+    return "[" .. bar .. "]"
+end
+
+-- Hide and remove live OSD overlay
+local function hide_overlay()
+    osd_active = false
+    if osd_timer then
+        osd_timer:kill()
+        osd_timer = nil
+    end
+    if osd_overlay then
+        osd_overlay:remove()
+    end
+end
+
+-- Update track titles and subtitles on track changes
+local function update_track_metadata()
+    if not active_torrent or not active_torrent.videos then return end
+    local current_path = mp.get_property("path", "")
+    local current_pos = mp.get_property_number("playlist-pos", 0)
+
+    for _, v in ipairs(active_torrent.videos) do
+        if v.stream_url == current_path then
+            mp.set_property("force-media-title", v.name)
+            mp.set_property("title", v.name)
+            pcall(function()
+                mp.set_property(string.format("playlist/%d/title", current_pos), v.name)
+            end)
+            if v.subtitles then
+                for _, sub in ipairs(v.subtitles) do
+                    mp.commandv("sub-add", sub.download_url, "auto", sub.name)
+                end
+            end
+            break
+        end
+    end
+end
+
 -- Terminate previous companion server if running
 local function stop_active_companion()
+    hide_overlay()
     if current_server then
         if current_server.base_url then
             msg.info("Requesting shutdown for server on " .. current_server.base_url)
@@ -137,8 +200,8 @@ local function stop_active_companion()
     end
 end
 
--- Hook: on_load
-mp.add_hook("on_load", 50, function()
+-- Hook: on_load (priority 10 so we intercept before standard file opens)
+mp.add_hook("on_load", 10, function()
     local raw_url = mp.get_property("stream-open-filename", "")
     local source = extract_torrent_source(raw_url)
     if not source then
@@ -246,14 +309,16 @@ mp.add_hook("on_load", 50, function()
         return
     end
 
-    -- Configure first playable video stream
+    -- Redirect current stream to local HTTP endpoint
     mp.set_property("stream-open-filename", first_stream)
 
-    if #videos > 0 then
-        mp.set_property("file-local-options/force-media-title", videos[1].name)
-    elseif ready_data.name then
-        mp.set_property("file-local-options/force-media-title", ready_data.name)
-    end
+    -- Explicitly set clean media title and playlist title
+    local display_title = (videos[1] and videos[1].name) or ready_data.name or "Torrent Stream"
+    mp.set_property("force-media-title", display_title)
+    mp.set_property("title", display_title)
+    pcall(function()
+        mp.set_property("playlist/0/title", display_title)
+    end)
 
     -- Auto-Playlist Mode (Default as requested)
     -- If multi-file torrent, automatically load all files sequentially into playlist
@@ -262,13 +327,16 @@ mp.add_hook("on_load", 50, function()
         for i = 2, #videos do
             local v = videos[i]
             mp.commandv("loadfile", v.stream_url, "append")
+            pcall(function()
+                mp.set_property(string.format("playlist/%d/title", i - 1), v.name)
+            end)
         end
         if opts.show_osd then
-            mp.osd_message(string.format("Torrent loaded: %d episodes/files added to playlist", #videos), 4)
+            mp.osd_message(string.format("Torrent loaded: %d episodes added to playlist", #videos), 4)
         end
     else
         if opts.show_osd then
-            mp.osd_message("Streaming: " .. (ready_data.name or "Torrent video"), 3)
+            mp.osd_message("Streaming: " .. display_title, 3)
         end
     end
 
@@ -281,34 +349,16 @@ mp.add_hook("on_load", 50, function()
     end
 end)
 
--- Track changes: update media title and inject subtitles for subsequent playlist entries
-mp.register_event("file-loaded", function()
-    if not active_torrent or not active_torrent.videos or #active_torrent.videos <= 1 then
+-- Event hooks to ensure title bar and playlist stay clean during playback & track transitions
+mp.register_event("start-file", update_track_metadata)
+mp.register_event("file-loaded", update_track_metadata)
+
+-- Refresh and render ASS styled OSD overlay (webtorrent / stats.lua style)
+local function refresh_osd_overlay()
+    if not osd_active or not current_server or not current_server.base_url then
         return
     end
 
-    local path = mp.get_property("path", "")
-    for _, v in ipairs(active_torrent.videos) do
-        if v.stream_url == path then
-            mp.set_property("file-local-options/force-media-title", v.name)
-            if v.subtitles then
-                for _, sub in ipairs(v.subtitles) do
-                    mp.commandv("sub-add", sub.download_url, "auto", sub.name)
-                end
-            end
-            break
-        end
-    end
-end)
-
--- On-Screen Display Torrent Statistics (toggleable with key 'T')
-local function show_stats_osd()
-    if not current_server or not current_server.base_url then
-        mp.osd_message("mpv-gotorrent: Not currently streaming a torrent.", 2)
-        return
-    end
-
-    -- Query status endpoint
     local res = mp.command_native({
         name = "subprocess",
         playback_only = false,
@@ -317,35 +367,76 @@ local function show_stats_osd()
     })
 
     if not res or res.status ~= 0 or not res.stdout then
-        mp.osd_message("mpv-gotorrent: Unable to fetch status.", 2)
         return
     end
 
     local stats = utils.parse_json(res.stdout)
     if not stats then return end
 
-    local text = string.format(
-        "Torrent: %s\n" ..
-        "Speed: ↓ %s | ↑ %s\n" ..
-        "Peers: %d (Active: %d)\n" ..
-        "Progress: %.1f%% (%s / %s)\n" ..
-        "Pieces: %d / %d",
+    if not osd_overlay then
+        osd_overlay = mp.create_osd_overlay("ass-events")
+    end
+
+    local style_header = string.format(
+        "{\\r\\an7\\fs%d\\fn%s\\bord%.1f\\3c&H%s&\\1c&H%s&\\4c&H%s&}",
+        opts.font_size,
+        opts.font,
+        opts.border_size,
+        opts.border_color,
+        opts.font_color,
+        opts.shadow_color
+    )
+
+    local c_cyan = string.format("{\\1c&H%s&}", opts.accent_color)
+    local c_green = string.format("{\\1c&H%s&}", opts.progress_color)
+    local c_white = "{\\1c&HFFFFFF&}"
+
+    local bar = format_progress_bar(stats.progress, 20)
+    local ass_content = string.format(
+        "%s" ..
+        c_cyan .. "[● BitTorrent Stream]" .. c_white .. "\\N" ..
+        "Torrent:   %s\\N" ..
+        "Speed:     " .. c_cyan .. "↓ %s" .. c_white .. "   " .. c_green .. "↑ %s" .. c_white .. "\\N" ..
+        "Swarm:     Peers: %d (Active: %d)\\N" ..
+        "Progress:  " .. c_green .. "%s %.1f%%" .. c_white .. "\\N" ..
+        "Pieces:    %d / %d (%s / %s)",
+        style_header,
         stats.name or "Streaming",
         format_speed(stats.download_speed or 0),
         format_speed(stats.upload_speed or 0),
         stats.peers or 0,
         stats.active_peers or 0,
+        bar,
         stats.progress or 0,
-        format_bytes(stats.completed_bytes or 0),
-        format_bytes(stats.total_bytes or 0),
         stats.pieces_done or 0,
-        stats.piece_count or 0
+        stats.piece_count or 0,
+        format_bytes(stats.completed_bytes or 0),
+        format_bytes(stats.total_bytes or 0)
     )
 
-    mp.osd_message(text, 4)
+    osd_overlay.data = ass_content
+    osd_overlay:update()
 end
 
-mp.add_key_binding("T", "gotorrent-stats", show_stats_osd)
+-- Toggle OSD Overlay on/off (Key: 'T')
+local function toggle_stats_overlay()
+    if not current_server or not current_server.base_url then
+        mp.osd_message("mpv-gotorrent: Not currently streaming a torrent.", 2)
+        return
+    end
+
+    osd_active = not osd_active
+    if osd_active then
+        refresh_osd_overlay()
+        if not osd_timer then
+            osd_timer = mp.add_periodic_timer(1, refresh_osd_overlay)
+        end
+    else
+        hide_overlay()
+    end
+end
+
+mp.add_key_binding("T", "gotorrent-stats", toggle_stats_overlay)
 
 -- Cleanup on mpv shutdown
 mp.register_event("shutdown", function()
