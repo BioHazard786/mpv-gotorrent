@@ -359,7 +359,7 @@ print_usage_tips() {
   printf "  mpv \"https://example.com/stream.torrent\"\n"
   printf "\n"
   printf "%sIn-player Controls:%s\n" "${C_BOLD}" "${C_RESET}"
-  printf "  Press %sP%s in mpv to toggle live swarm download/upload stats.\n" "${C_CYAN}" "${C_RESET}"
+  printf "  Press %sp%s in mpv to toggle live swarm download/upload stats.\n" "${C_CYAN}" "${C_RESET}"
 }
 
 # Main installer flow

@@ -26,10 +26,13 @@ type Config struct {
 
 // Engine wraps anacrolix/torrent client and manages active torrent streams.
 type Engine struct {
-	client    *torrent.Client
-	torrent   *torrent.Torrent
-	dataDir   string
-	keepFiles bool
+	client             *torrent.Client
+	torrent            *torrent.Torrent
+	dataDir            string
+	persistentCacheDir string
+	keepFiles          bool
+	trackerManager     *TrackerManager
+	dhtManager         *DHTManager
 
 	mu             sync.RWMutex
 	lastReadBytes  int64
@@ -68,6 +71,14 @@ func NewEngine(cfg Config) (*Engine, error) {
 		}
 	}
 
+	persistentDir := ""
+	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
+		persistentDir = filepath.Join(userCache, "mpv-gotorrent")
+	} else {
+		persistentDir = cfg.DataDir
+	}
+	_ = os.MkdirAll(persistentDir, 0755)
+
 	clientConfig := torrent.NewDefaultClientConfig()
 	clientConfig.DataDir = cfg.DataDir
 	clientConfig.ListenPort = cfg.Port
@@ -77,7 +88,7 @@ func NewEngine(cfg Config) (*Engine, error) {
 	clientConfig.DisableTCP = false
 	clientConfig.DisableUTP = false
 
-	slog.Debug("initializing torrent client", "cache_dir", cfg.DataDir, "port", cfg.Port)
+	slog.Debug("initializing torrent client", "cache_dir", cfg.DataDir, "persistent_dir", persistentDir, "port", cfg.Port)
 	client, err := torrent.NewClient(clientConfig)
 	if err != nil {
 		if !cfg.KeepFiles {
@@ -86,11 +97,25 @@ func NewEngine(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("failed to initialize torrent client: %w", err)
 	}
 
+	tm := NewTrackerManager(persistentDir)
+	dm := NewDHTManager(client, persistentDir)
+
+	// Warm the DHT routing table immediately using cached nodes
+	if count, err := dm.LoadNodes(); err == nil && count > 0 {
+		slog.Info("warmed DHT routing table from cache", "nodes", count)
+	}
+
+	// Periodically sync DHT nodes (every 2 minutes)
+	dm.StartPeriodicSync(2 * time.Minute)
+
 	eng := &Engine{
-		client:        client,
-		dataDir:       cfg.DataDir,
-		keepFiles:     cfg.KeepFiles,
-		lastCheckTime: time.Now(),
+		client:             client,
+		dataDir:            cfg.DataDir,
+		persistentCacheDir: persistentDir,
+		keepFiles:          cfg.KeepFiles,
+		trackerManager:     tm,
+		dhtManager:         dm,
+		lastCheckTime:      time.Now(),
 	}
 
 	// Background ticker to calculate download / upload speeds
@@ -104,19 +129,43 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 	src = strings.TrimSpace(src)
 	var t *torrent.Torrent
 	var err error
+	var isPrivate bool
 
 	if idx := strings.Index(src, "magnet:?"); idx != -1 {
 		src = src[idx:]
-		slog.Info("adding magnet URI")
-		t, err = e.client.AddMagnet(src)
-		if err != nil {
-			return nil, fmt.Errorf("failed to add magnet: %w", err)
+
+		// Attempt to parse magnet URI to check if we already have the .torrent cached
+		if mag, parseErr := metainfo.ParseMagnetUri(src); parseErr == nil && !mag.InfoHash.IsZero() {
+			cachedPath := e.getTorrentCachePath(mag.InfoHash.HexString())
+			if fileExists(cachedPath) {
+				slog.Info("loading cached .torrent metainfo for magnet", "path", cachedPath)
+				if mi, err := metainfo.LoadFromFile(cachedPath); err == nil {
+					t, err = e.client.AddTorrent(mi)
+					if err != nil {
+						slog.Warn("failed to add torrent from cache, falling back to network", "err", err)
+						t = nil
+					}
+				}
+			}
 		}
+
+		if t == nil {
+			slog.Info("adding magnet URI")
+			t, err = e.client.AddMagnet(src)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add magnet: %w", err)
+			}
+		}
+
+		e.injectPublicTrackers(t)
 	} else if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
 		slog.Info("fetching remote .torrent file", "url", src)
-		t, err = e.addTorrentFromURL(ctx, src)
+		t, isPrivate, err = e.addTorrentFromURL(ctx, src)
 		if err != nil {
 			return nil, fmt.Errorf("failed to download torrent file from URL: %w", err)
+		}
+		if !isPrivate {
+			e.injectPublicTrackers(t)
 		}
 	} else if fileExists(src) {
 		slog.Info("loading local .torrent file", "path", src)
@@ -127,6 +176,13 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 		t, err = e.client.AddTorrent(mi)
 		if err != nil {
 			return nil, fmt.Errorf("failed to add torrent from file: %w", err)
+		}
+		if info, parseErr := mi.UnmarshalInfo(); parseErr == nil && info.Private != nil && *info.Private {
+			isPrivate = true
+			slog.Info("torrent marked private, skipping public tracker injection")
+		}
+		if !isPrivate {
+			e.injectPublicTrackers(t)
 		}
 	} else if isInfoHash(src) {
 		cachedPath := e.getTorrentCachePath(src)
@@ -148,6 +204,8 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 				return nil, fmt.Errorf("failed to add infohash magnet: %w", err)
 			}
 		}
+
+		e.injectPublicTrackers(t)
 	} else {
 		return nil, fmt.Errorf("unrecognized source format: %s", src)
 	}
@@ -162,6 +220,12 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 			"piece_count", t.NumPieces(),
 		)
 		e.saveTorrentToCache(t)
+		// Persist DHT nodes immediately to preserve fresh swarm peers
+		if e.dhtManager != nil {
+			go func() {
+				_ = e.dhtManager.SaveNodes()
+			}()
+		}
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -174,6 +238,18 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 	e.prioritizeMetadataPieces(t)
 
 	return t, nil
+}
+
+// injectPublicTrackers announces the torrent to cached public trackers for rapid peer discovery.
+func (e *Engine) injectPublicTrackers(t *torrent.Torrent) {
+	if t == nil || e.trackerManager == nil {
+		return
+	}
+	tiers := e.trackerManager.GetTrackers()
+	if len(tiers) > 0 {
+		t.AddTrackers(tiers)
+		slog.Debug("injected public trackers for boost", "tiers_count", len(tiers))
+	}
 }
 
 // prioritizeMetadataPieces prioritizes the initial and trailing pieces of files.
@@ -294,6 +370,13 @@ func (e *Engine) speedMonitor() {
 func (e *Engine) Close() error {
 	slog.Info("closing torrent engine")
 	var errMsgs []string
+
+	if e.dhtManager != nil {
+		if err := e.dhtManager.Close(); err != nil {
+			errMsgs = append(errMsgs, fmt.Sprintf("dht shutdown error: %v", err))
+		}
+	}
+
 	if e.client != nil {
 		errs := e.client.Close()
 		for _, err := range errs {
@@ -316,37 +399,44 @@ func (e *Engine) Close() error {
 	return nil
 }
 
-func (e *Engine) addTorrentFromURL(ctx context.Context, url string) (*torrent.Torrent, error) {
+func (e *Engine) addTorrentFromURL(ctx context.Context, url string) (*torrent.Torrent, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP error: %s", resp.Status)
+		return nil, false, fmt.Errorf("HTTP error: %s", resp.Status)
 	}
 
 	tmpFile, err := os.CreateTemp("", "torrent-*.torrent")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer os.Remove(tmpFile.Name())
 	defer tmpFile.Close()
 
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	mi, err := metainfo.LoadFromFile(tmpFile.Name())
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return e.client.AddTorrent(mi)
+
+	isPrivate := false
+	if info, parseErr := mi.UnmarshalInfo(); parseErr == nil && info.Private != nil && *info.Private {
+		isPrivate = true
+	}
+
+	t, err := e.client.AddTorrent(mi)
+	return t, isPrivate, err
 }
 
 func fileExists(path string) bool {
@@ -379,9 +469,12 @@ func isInfoHash(s string) bool {
 }
 
 func (e *Engine) getTorrentCachePath(infoHash string) string {
-	base := e.dataDir
-	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
-		base = filepath.Join(userCache, "mpv-gotorrent")
+	base := e.persistentCacheDir
+	if base == "" {
+		base = e.dataDir
+		if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
+			base = filepath.Join(userCache, "mpv-gotorrent")
+		}
 	}
 	dir := filepath.Join(base, "torrents")
 	_ = os.MkdirAll(dir, 0755)

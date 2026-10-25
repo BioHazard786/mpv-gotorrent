@@ -240,7 +240,7 @@ function Show-Usage([string]$TargetDir) {
     Write-Host ""
     Write-Host "In-player Controls:" -ForegroundColor White
     Write-Host "  Press " -NoNewline
-    Write-Host "P" -ForegroundColor Cyan -NoNewline
+    Write-Host "p" -ForegroundColor Cyan -NoNewline
     Write-Host " in mpv to toggle live swarm download/upload stats."
 }
 
