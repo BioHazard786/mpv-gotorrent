@@ -60,7 +60,7 @@ type SubtitleItem struct {
 }
 
 // ParseFiles categorizes and prepares torrent files.
-func ParseFiles(files []*torrent.File, baseURL string) ([]FileItem, []FileItem) {
+func ParseFiles(files []*torrent.File, baseURL string, infoHash string) ([]FileItem, []FileItem) {
 	var allFiles []FileItem
 	var videoFiles []FileItem
 	var subFiles []FileItem
@@ -108,15 +108,15 @@ func ParseFiles(files []*torrent.File, baseURL string) ([]FileItem, []FileItem) 
 	// Associate subtitles with video files
 	for i := range videoFiles {
 		encodedName := url.PathEscape(videoFiles[i].Name)
-		videoFiles[i].StreamURL = fmt.Sprintf("%s/stream/%d/%s", baseURL, videoFiles[i].Index, encodedName)
-		videoFiles[i].Subtitles = findMatchingSubtitles(videoFiles[i], subFiles, baseURL)
+		videoFiles[i].StreamURL = fmt.Sprintf("%s/torrent/%s/%d/%s", baseURL, infoHash, videoFiles[i].Index, encodedName)
+		videoFiles[i].Subtitles = findMatchingSubtitles(videoFiles[i], subFiles, baseURL, infoHash)
 	}
 
 	return allFiles, videoFiles
 }
 
 // findMatchingSubtitles matches subtitles located in same directory or with similar prefix.
-func findMatchingSubtitles(video FileItem, subs []FileItem, baseURL string) []SubtitleItem {
+func findMatchingSubtitles(video FileItem, subs []FileItem, baseURL string, infoHash string) []SubtitleItem {
 	var matched []SubtitleItem
 	videoDir := filepath.Dir(video.Path)
 	videoStem := strings.TrimSuffix(video.Name, filepath.Ext(video.Name))
@@ -142,7 +142,7 @@ func findMatchingSubtitles(video FileItem, subs []FileItem, baseURL string) []Su
 				Index:       sub.Index,
 				Name:        sub.Name,
 				Language:    lang,
-				DownloadURL: fmt.Sprintf("%s/sub/%d/%s", baseURL, sub.Index, encodedSubName),
+				DownloadURL: fmt.Sprintf("%s/torrent/%s/sub/%d/%s", baseURL, infoHash, sub.Index, encodedSubName),
 			})
 		}
 	}

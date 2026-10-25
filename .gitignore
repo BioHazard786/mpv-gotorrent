@@ -1,6 +1,7 @@
+dist/
 bin/
-scripts/mpv-gotorrent/mpv-gotorrent
-scripts/mpv-gotorrent/mpv-gotorrent.exe
+*.exe
+mpv-gotorrent
 *.tmp
 *.log
 .DS_Store

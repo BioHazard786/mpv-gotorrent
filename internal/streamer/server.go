@@ -45,15 +45,33 @@ type MetadataResponse struct {
 	Files          []playlist.FileItem `json:"files"`
 }
 
-// NewServer creates a new streamer HTTP server.
-func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
-	addr := fmt.Sprintf("127.0.0.1:%d", requestedPort)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind HTTP server on %s: %w", addr, err)
+func listenTCPWithFallback(requestedPort int) (net.Listener, int, error) {
+	if requestedPort <= 0 {
+		requestedPort = 8989
 	}
 
-	actualPort := listener.Addr().(*net.TCPAddr).Port
+	for p := requestedPort; p < requestedPort+20; p++ {
+		addr := fmt.Sprintf("127.0.0.1:%d", p)
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			return l, p, nil
+		}
+	}
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to bind HTTP server to free port: %w", err)
+	}
+	return l, l.Addr().(*net.TCPAddr).Port, nil
+}
+
+// NewServer creates a new streamer HTTP server.
+func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
+	listener, actualPort, err := listenTCPWithFallback(requestedPort)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind HTTP server: %w", err)
+	}
+
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
 
 	s := &Server{
@@ -67,17 +85,15 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 	// Index files from torrent
 	t := eng.Torrent()
 	if t != nil && t.Info() != nil {
-		all, videos := playlist.ParseFiles(t.Files(), baseURL)
+		infoHash := t.InfoHash().HexString()
+		all, videos := playlist.ParseFiles(t.Files(), baseURL, infoHash)
 		s.allFiles = all
 		s.videoFiles = videos
 		slog.Debug("indexed torrent files", "total", len(all), "videos", len(videos))
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/stream", s.handleStream)
-	mux.HandleFunc("/stream/", s.handleStream)
-	mux.HandleFunc("/sub", s.handleSubtitle)
-	mux.HandleFunc("/sub/", s.handleSubtitle)
+	mux.HandleFunc("/torrent/", s.handleTorrentRoute)
 	mux.HandleFunc("/playlist", s.handlePlaylist)
 	mux.HandleFunc("/meta", s.handleMeta)
 	mux.HandleFunc("/status", s.handleStatus)
@@ -90,7 +106,7 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	slog.Info("HTTP streaming server initialized", "base_url", baseURL)
+	slog.Info("HTTP streaming server initialized", "base_url", baseURL, "port", actualPort)
 	return s, nil
 }
 
@@ -140,29 +156,62 @@ func (s *Server) Stop() error {
 	return s.httpServer.Shutdown(ctx)
 }
 
-func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
-	var fileIdx int
-	var err error
+// M3UPlaylist generates an M3U format playlist with clean titles and deterministic URLs.
+func (s *Server) M3UPlaylist() string {
+	s.mu.RLock()
+	videos := s.videoFiles
+	s.mu.RUnlock()
 
-	if strings.HasPrefix(r.URL.Path, "/stream/") {
-		trimmed := strings.TrimPrefix(r.URL.Path, "/stream/")
-		parts := strings.Split(trimmed, "/")
-		if len(parts) > 0 && parts[0] != "" {
-			fileIdx, err = strconv.Atoi(parts[0])
-		} else {
-			err = fmt.Errorf("missing file index in path")
-		}
-	} else {
-		fileIdxStr := r.URL.Query().Get("file")
-		fileIdx, err = strconv.Atoi(fileIdxStr)
+	var sb strings.Builder
+	sb.WriteString("#EXTM3U\n")
+	for _, v := range videos {
+		cleanTitle := strings.TrimSuffix(v.Name, filepath.Ext(v.Name))
+		sb.WriteString(fmt.Sprintf("#EXTINF:-1,%s\n", cleanTitle))
+		sb.WriteString(fmt.Sprintf("%s\n", v.StreamURL))
 	}
+	return sb.String()
+}
 
-	if err != nil {
-		slog.Warn("invalid stream request", "path", r.URL.Path, "query", r.URL.RawQuery)
-		http.Error(w, "invalid or missing file query param", http.StatusBadRequest)
+func (s *Server) handleTorrentRoute(w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.TrimPrefix(r.URL.Path, "/torrent/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		http.Error(w, "invalid torrent route path", http.StatusBadRequest)
 		return
 	}
 
+	// Route 1: /torrent/<infohash>/playlist
+	if parts[1] == "playlist" {
+		s.handlePlaylist(w, r)
+		return
+	}
+
+	// Route 2: /torrent/<infohash>/sub/<subIdx>/<name>
+	if parts[1] == "sub" {
+		if len(parts) < 3 {
+			http.Error(w, "missing subtitle index", http.StatusBadRequest)
+			return
+		}
+		subIdx, err := strconv.Atoi(parts[2])
+		if err != nil {
+			http.Error(w, "invalid subtitle index", http.StatusBadRequest)
+			return
+		}
+		s.serveSubtitleFile(w, r, subIdx)
+		return
+	}
+
+	// Route 3: /torrent/<infohash>/<fileIdx>/<name>
+	fileIdx, err := strconv.Atoi(parts[1])
+	if err != nil {
+		http.Error(w, "invalid file index", http.StatusBadRequest)
+		return
+	}
+
+	s.serveTorrentStream(w, r, fileIdx)
+}
+
+func (s *Server) serveTorrentStream(w http.ResponseWriter, r *http.Request, fileIdx int) {
 	t := s.engine.Torrent()
 	if t == nil {
 		slog.Warn("stream request rejected: torrent not ready")
@@ -225,28 +274,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, targetFile.DisplayPath(), modTime, reader)
 }
 
-func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
-	var fileIdx int
-	var err error
-
-	if strings.HasPrefix(r.URL.Path, "/sub/") {
-		trimmed := strings.TrimPrefix(r.URL.Path, "/sub/")
-		parts := strings.Split(trimmed, "/")
-		if len(parts) > 0 && parts[0] != "" {
-			fileIdx, err = strconv.Atoi(parts[0])
-		} else {
-			err = fmt.Errorf("missing subtitle index in path")
-		}
-	} else {
-		fileIdxStr := r.URL.Query().Get("file")
-		fileIdx, err = strconv.Atoi(fileIdxStr)
-	}
-
-	if err != nil {
-		http.Error(w, "invalid file parameter", http.StatusBadRequest)
-		return
-	}
-
+func (s *Server) serveSubtitleFile(w http.ResponseWriter, r *http.Request, fileIdx int) {
 	t := s.engine.Torrent()
 	if t == nil {
 		http.Error(w, "torrent not ready", http.StatusServiceUnavailable)
@@ -282,12 +310,11 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	videos := s.videoFiles
-	s.mu.RUnlock()
-
 	format := r.URL.Query().Get("format")
 	if format == "json" || strings.Contains(r.Header.Get("Accept"), "application/json") {
+		s.mu.RLock()
+		videos := s.videoFiles
+		s.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(videos)
 		return
@@ -296,12 +323,7 @@ func (s *Server) handlePlaylist(w http.ResponseWriter, r *http.Request) {
 	// Standard M3U playlist format
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8")
 	w.Header().Set("Content-Disposition", "inline; filename=\"playlist.m3u8\"")
-
-	fmt.Fprintf(w, "#EXTM3U\n")
-	for _, v := range videos {
-		fmt.Fprintf(w, "#EXTINF:-1,%s\n", v.Name)
-		fmt.Fprintf(w, "%s\n", v.StreamURL)
-	}
+	_, _ = w.Write([]byte(s.M3UPlaylist()))
 }
 
 func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,101 @@
+name: Build and Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run unit tests
+        run: go test -v ./...
+
+      - name: Extract version from tag
+        id: vars
+        shell: bash
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "VERSION=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=v0.1.0-dev-${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and package release binaries
+        env:
+          VERSION: ${{ steps.vars.outputs.VERSION }}
+        run: |
+          mkdir -p dist
+          targets=(
+            "linux/amd64/mpv-gotorrent"
+            "linux/arm64/mpv-gotorrent"
+            "darwin/amd64/mpv-gotorrent"
+            "darwin/arm64/mpv-gotorrent"
+            "windows/amd64/mpv-gotorrent.exe"
+            "windows/arm64/mpv-gotorrent.exe"
+          )
+
+          for target in "${targets[@]}"; do
+            IFS="/" read -r target_os target_arch target_bin <<< "$target"
+            output_dir="dist/${target_os}_${target_arch}"
+            mkdir -p "$output_dir"
+            echo "==> Building for ${target_os}/${target_arch}..."
+
+            CGO_ENABLED=0 GOOS=$target_os GOARCH=$target_arch go build \
+              -ldflags="-s -w -X main.Version=${VERSION}" \
+              -o "${output_dir}/${target_bin}" \
+              ./cmd/mpv-gotorrent
+
+            # Copy Lua script alongside binary in package
+            cp scripts/main.lua "${output_dir}/main.lua"
+
+            # Create standalone named binary for direct download
+            standalone_name="mpv-gotorrent-${target_os}-${target_arch}"
+            if [ "$target_os" = "windows" ]; then
+              cp "${output_dir}/${target_bin}" "dist/${standalone_name}.exe"
+            else
+              cp "${output_dir}/${target_bin}" "dist/${standalone_name}"
+            fi
+
+            # Create release archive (.zip for windows, .tar.gz for unix)
+            archive_name="mpv-gotorrent_${VERSION}_${target_os}_${target_arch}"
+            if [ "$target_os" = "windows" ]; then
+              (cd "$output_dir" && zip -r "../../dist/${archive_name}.zip" "$target_bin" "main.lua")
+            else
+              (cd "$output_dir" && tar -czvf "../../dist/${archive_name}.tar.gz" "$target_bin" "main.lua")
+            fi
+          done
+
+          # Generate SHA256 checksums
+          cd dist
+          sha256sum mpv-gotorrent_*.tar.gz mpv-gotorrent_*.zip mpv-gotorrent-* > checksums.txt
+          echo "Generated Checksums:"
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.vars.outputs.VERSION }}
+        run: |
+          gh release create "$VERSION" \
+            dist/mpv-gotorrent_*.tar.gz \
+            dist/mpv-gotorrent_*.zip \
+            dist/mpv-gotorrent-* \
+            dist/checksums.txt \
+            --title "mpv-gotorrent $VERSION" \
+            --generate-notes

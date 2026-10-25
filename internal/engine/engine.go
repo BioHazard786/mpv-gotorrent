@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -128,11 +129,24 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 			return nil, fmt.Errorf("failed to add torrent from file: %w", err)
 		}
 	} else if isInfoHash(src) {
-		magnet := "magnet:?xt=urn:btih:" + src
-		slog.Info("resolving infohash to magnet", "infohash", src)
-		t, err = e.client.AddMagnet(magnet)
-		if err != nil {
-			return nil, fmt.Errorf("failed to add infohash magnet: %w", err)
+		cachedPath := e.getTorrentCachePath(src)
+		if fileExists(cachedPath) {
+			slog.Info("loading cached .torrent metainfo for instant playback", "path", cachedPath)
+			mi, parseErr := metainfo.LoadFromFile(cachedPath)
+			if parseErr == nil {
+				t, err = e.client.AddTorrent(mi)
+			} else {
+				slog.Warn("failed to parse cached torrent", "err", parseErr)
+			}
+		}
+
+		if t == nil {
+			magnet := "magnet:?xt=urn:btih:" + src
+			slog.Info("resolving infohash via BitTorrent DHT/swarm", "infohash", src)
+			t, err = e.client.AddMagnet(magnet)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add infohash magnet: %w", err)
+			}
 		}
 	} else {
 		return nil, fmt.Errorf("unrecognized source format: %s", src)
@@ -147,6 +161,7 @@ func (e *Engine) AddSource(ctx context.Context, src string) (*torrent.Torrent, e
 			"total_bytes", t.Length(),
 			"piece_count", t.NumPieces(),
 		)
+		e.saveTorrentToCache(t)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -343,9 +358,18 @@ func fileExists(path string) bool {
 }
 
 func isInfoHash(s string) bool {
-	if len(s) == 40 {
+	s = strings.TrimSpace(s)
+	if len(s) == 40 || len(s) == 64 {
 		for _, c := range s {
 			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(s) == 32 {
+		for _, c := range s {
+			if !((c >= '2' && c <= '7') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
 				return false
 			}
 		}
@@ -354,7 +378,38 @@ func isInfoHash(s string) bool {
 	return false
 }
 
+func (e *Engine) getTorrentCachePath(infoHash string) string {
+	base := e.dataDir
+	if userCache, err := os.UserCacheDir(); err == nil && userCache != "" {
+		base = filepath.Join(userCache, "mpv-gotorrent")
+	}
+	dir := filepath.Join(base, "torrents")
+	_ = os.MkdirAll(dir, 0755)
+	return filepath.Join(dir, strings.ToLower(infoHash)+".torrent")
+}
+
+func (e *Engine) saveTorrentToCache(t *torrent.Torrent) {
+	if t == nil {
+		return
+	}
+	hash := t.InfoHash().HexString()
+	path := e.getTorrentCachePath(hash)
+	f, err := os.Create(path)
+	if err != nil {
+		slog.Debug("failed to create torrent cache file", "path", path, "err", err)
+		return
+	}
+	defer f.Close()
+	mi := t.Metainfo()
+	if err := mi.Write(f); err != nil {
+		slog.Debug("failed to write torrent metainfo to cache", "path", path, "err", err)
+	} else {
+		slog.Info("cached torrent metainfo for instant reopening", "path", path)
+	}
+}
+
 // DataDir returns the path to the engine's data directory.
 func (e *Engine) DataDir() string {
 	return e.dataDir
 }
+

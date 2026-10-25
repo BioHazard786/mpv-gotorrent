@@ -1,6 +1,7 @@
 MODULE := github.com/biohazard786/mpv-gotorrent
 BIN_NAME := mpv-gotorrent
-LDFLAGS := -s -w
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "v0.1.0")
+LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 .PHONY: all build test clean cross install
 
@@ -9,9 +10,7 @@ all: build
 build:
 	@mkdir -p bin
 	go build -ldflags="$(LDFLAGS)" -o bin/$(BIN_NAME) ./cmd/$(BIN_NAME)
-	@cp bin/$(BIN_NAME) scripts/mpv-gotorrent/$(BIN_NAME)
-	@chmod +x scripts/mpv-gotorrent/$(BIN_NAME)
-	@echo "Built bin/$(BIN_NAME) and mirrored to scripts/mpv-gotorrent/$(BIN_NAME)"
+	@echo "Built bin/$(BIN_NAME) (version $(VERSION))"
 
 test:
 	go test -v ./...
@@ -29,13 +28,9 @@ cross:
 	@echo "==> Cross-compilation completed successfully."
 
 install: build
-	@echo "==> Installing mpv-gotorrent to mpv configuration directory..."
-	@MPV_DIR="$${HOME}/.config/mpv/scripts/mpv-gotorrent"; \
-	mkdir -p "$$MPV_DIR"; \
-	cp scripts/mpv-gotorrent/main.lua "$$MPV_DIR/main.lua"; \
-	cp bin/$(BIN_NAME) "$$MPV_DIR/$(BIN_NAME)"; \
-	chmod +x "$$MPV_DIR/$(BIN_NAME)"; \
-	echo "Installed main.lua and $(BIN_NAME) to $$MPV_DIR"
+	@echo "==> Installing mpv-gotorrent..."
+	@./install.sh --local
 
 clean:
-	rm -rf bin/ scripts/mpv-gotorrent/$(BIN_NAME)
+	rm -rf bin/
+

@@ -1,131 +1,128 @@
 # mpv-gotorrent
 
-A high-performance, cross-platform **mpv** plugin and standalone Go companion that streams BitTorrent files and magnet links directly into mpv with **zero external dependencies** (no Node.js, Python, or TorrServer background service required).
+Stream BitTorrent files and magnet links directly inside **mpv** with **zero setup** and **zero external dependencies**. No Node.js, Python, Docker, or TorrServer background service required.
 
 ---
 
-## Features
+## ✨ Features
 
-- **Zero Runtime Dependencies**: Single compiled static Go companion binary + Lua hook script.
-- **Ultra-Fast Startup**: Connects to the swarm and begins streaming in milliseconds.
-- **Auto-Playlist by Default**: Multi-file torrents (season packs, multi-part series) are automatically discovered, naturally sorted (`S01E01`, `S01E02`...), and queued sequentially into mpv's playlist.
-- **Smart Container Readahead**: Automatically prioritizes video headers (`moov` atoms in MP4 / EBML in MKV) and maintains a 32 MB sliding window ahead of playback for seamless seeking.
-- **Automatic Subtitle Injection**: Detects and attaches `.srt`, `.vtt`, `.ass`, and `.sub` files within the torrent swarm to the active stream using `sub-add`.
-- **Bulletproof Lifecycle & Zombie Protection**:
-  - **Linux**: `PR_SET_PDEATHSIG` automatic kernel signal on parent death.
-  - **macOS**: `kqueue` `NOTE_EXIT` monitoring on parent PID.
-  - **Windows**: Win32 `OpenProcess(SYNCHRONIZE)` and `WaitForSingleObject`.
-  - **Universal**: Inherited stdin pipe EOF detection that immediately cleans up if mpv crashes or receives `SIGKILL`.
-- **Beautiful Colored Logs**: Uses standard Go `log/slog` styled with [`tint`](https://github.com/lmittmann/tint).
-- **Interactive OSD Stats**: Press <kbd>T</kbd> inside mpv to view real-time download/upload speed, peer & seed counts, buffer completion, and progress.
+- ⚡ **Zero Setup & Self-Contained**: Single static companion binary + Lua script. Starts when mpv opens and closes automatically when you exit.
+- 🚀 **Instant Playback**: Connects to the BitTorrent swarm in milliseconds with smart readahead buffering for smooth seeking.
+- 🔄 **Full Resume & History**: Remembers your playback position (`watch_later`) and seamlessly integrates with mpv history scripts (`SimpleHistory`, `uosc`, `memo`).
+- 📑 **Smart Playlists**: Multi-file torrents (like TV shows and anime) are automatically ingested as clean, sorted episode playlists.
+- 💬 **Automatic Subtitles**: Automatically detects and injects subtitle files (`.srt`, `.vtt`, `.ass`) included in the torrent.
+- 📊 **Live Stats OSD**: Press <kbd>p</kbd> at any time to check real-time download/upload speed, peer count, and buffer progress.
+- 🧹 **Auto-Cleanup**: Temporary torrent files are automatically cleaned up on exit (or kept if you prefer).
 
 ---
 
-## Directory Structure
+## 🚀 Quick Install
 
-Like modern mpv plugins (e.g. `videoclip`), both the script entrypoint and the binary live in an isolated directory:
+Install or update with a single command in your terminal:
 
-```
-~/.config/mpv/scripts/mpv-gotorrent/
-├── main.lua
-└── mpv-gotorrent         (or mpv-gotorrent.exe on Windows)
-```
-
-The script uses `mp.get_script_directory()` to find the companion binary right next to `main.lua`.
-
----
-
-## Installation
-
-### 1. Build & Install via Makefile (Linux / macOS)
-
-Clone this repository and run:
-
+### Linux & macOS
 ```bash
+curl -fsSL https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/install.sh | bash
+```
+*(or via `wget`: `wget -qO- https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/install.sh | bash`)*
+
+### Windows (PowerShell)
+```powershell
+irm https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/install.ps1 | iex
+```
+
+> **Tip:** Re-running the command anytime will automatically check for and install updates.
+
+---
+
+## 📦 Other Installation Methods
+
+<details>
+<summary><b>Manual Installation</b></summary>
+
+1. Download the latest release archive (`.tar.gz` or `.zip`) for your operating system from the **[Releases](https://github.com/biohazard786/mpv-gotorrent/releases)** page.
+2. Extract the archive into your mpv scripts directory:
+   - **Linux / macOS**: `~/.config/mpv/scripts/mpv-gotorrent/`
+   - **Windows**: `%APPDATA%\mpv\scripts\mpv-gotorrent\`
+3. Verify that `main.lua` and `mpv-gotorrent` (or `mpv-gotorrent.exe`) are inside that folder.
+</details>
+
+<details>
+<summary><b>Build from Source</b></summary>
+
+Requires **Go 1.21+** and **make** (or PowerShell on Windows):
+
+**Linux / macOS:**
+```bash
+git clone https://github.com/biohazard786/mpv-gotorrent.git
+cd mpv-gotorrent
 make install
 ```
 
-This compiles `bin/mpv-gotorrent` and installs both `main.lua` and `mpv-gotorrent` into `~/.config/mpv/scripts/mpv-gotorrent/`.
-
-### 2. Manual Installation
-
-1. Copy `scripts/mpv-gotorrent/main.lua` to:
-   - **Linux / macOS**: `~/.config/mpv/scripts/mpv-gotorrent/main.lua`
-   - **Windows**: `%APPDATA%\mpv\scripts\mpv-gotorrent\main.lua`
-2. Copy the compiled binary `mpv-gotorrent` (or `mpv-gotorrent.exe`) into the exact same folder.
+**Windows:**
+```powershell
+git clone https://github.com/biohazard786/mpv-gotorrent.git
+cd mpv-gotorrent
+.\install.ps1 -Local
+```
+</details>
 
 ---
 
-## Usage
+## 🎬 How to Use
 
-Simply pass any magnet link, `.torrent` path, HTTP torrent URL, or 40-character infohash directly to `mpv`:
+Simply pass any magnet link, `.torrent` file, torrent URL, or 40-character infohash to mpv:
 
 ```bash
-# Magnet Link
+# Magnet link
 mpv "magnet:?xt=urn:btih:..."
 
 # Local .torrent file
-mpv path/to/movie.torrent
+mpv path/to/video.torrent
 
-# Remote .torrent URL
-mpv "https://example.com/file.torrent"
-
-# 40-character Infohash
-mpv 0123456789abcdef0123456789abcdef01234567
+# Remote torrent URL
+mpv "https://example.com/movie.torrent"
 ```
+
+> **Desktop Tip:** You can also simply **drag & drop** any `.torrent` file or magnet link directly into an open mpv window!
 
 ### Controls
 
-- <kbd>T</kbd>: Toggle on-screen display (OSD) torrent statistics (Download speed, Upload speed, Active Peers, Seeds, Buffer Progress).
-- <kbd>&lt;</kbd> / <kbd>&gt;</kbd>: Previous / Next episode in multi-file torrent playlists.
+| Key | Action |
+|:---:|:---|
+| <kbd>p</kbd> | Toggle live torrent stats overlay (Speed, Peers, Seeds, Buffer) |
+| <kbd>&lt;</kbd> / <kbd>&gt;</kbd> | Previous / Next episode in multi-file torrents |
 
 ---
 
-## Configuration
+## ⚙️ Configuration (Optional)
 
-You can customize behavior by creating `~/.config/mpv/script-opts/gotorrent.conf`:
+You can customize settings by creating `gotorrent.conf` in your mpv `script-opts` folder:
+- **Linux / macOS**: `~/.config/mpv/script-opts/gotorrent.conf`
+- **Windows**: `%APPDATA%\mpv\script-opts\gotorrent.conf`
 
 ```ini
-# Custom binary location (optional, automatically found by default)
-binary_path=
-
-# Custom cache directory (blank uses OS temp directory)
-cache_dir=
-
-# Keep downloaded files on exit (default false: auto-cleanup cache)
+# Keep downloaded files after quitting mpv (default: false = auto-delete cache)
 keep_files=false
 
-# Seconds to wait for torrent metadata before timing out
+# Custom download/cache directory (blank = system temporary directory)
+cache_dir=
+
+# Seconds to wait for torrent metadata before timing out (default: 60)
 timeout=60
 
-# Automatically queue multi-file torrents sequentially in playlist (default: true)
+# Automatically queue multi-file torrents as a playlist (default: true)
 auto_playlist=true
 
-# Show OSD messages on loading and playback events
+# Show on-screen messages when connecting and resolving metadata (default: true)
 show_osd=true
+
+# Preferred streaming HTTP port (default: 8989)
+port=8989
 ```
 
 ---
 
-## Building from Source
-
-### Requirements
-- Go 1.21+
-- `make`
-
-```bash
-# Build native binary
-make build
-
-# Run unit tests
-make test
-
-# Cross-compile for Windows (amd64), Linux (amd64/arm64), and macOS (Intel & Apple Silicon)
-make cross
-```
-
----
-
-## License
+## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.

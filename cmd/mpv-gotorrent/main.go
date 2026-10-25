@@ -24,6 +24,7 @@ type ReadyBanner struct {
 	BaseURL        string      `json:"base_url"`
 	PlaylistURL    string      `json:"playlist_url"`
 	FirstStreamURL string      `json:"first_stream_url"`
+	M3UPlaylist    string      `json:"m3u_playlist"`
 	Name           string      `json:"name"`
 	InfoHash       string      `json:"infohash"`
 	TotalSize      int64       `json:"total_size"`
@@ -73,19 +74,29 @@ func setupLogger(logLevelStr string) {
 	slog.SetDefault(logger)
 }
 
+// Version is set during build with -ldflags="-X main.Version=vX.Y.Z"
+var Version = "dev"
+
 func main() {
 	var (
-		source     = flag.String("source", "", "Torrent source (magnet link, .torrent file path, http(s) URL, or infohash)")
-		parentPID  = flag.Int("parent-pid", 0, "PID of parent mpv process for watchdog monitoring")
-		port       = flag.Int("port", 0, "Local HTTP port to bind to (0 for automatic free port)")
-		cacheDir   = flag.String("cache-dir", "", "Directory to store torrent cache files")
-		keepFiles  = flag.Bool("keep-files", false, "Do not delete downloaded files on exit")
-		timeoutSec = flag.Int("timeout", 60, "Seconds to wait for torrent metadata")
-		jsonOutput = flag.Bool("json-output", true, "Output JSON ready banner on stdout for mpv script")
-		stateFile  = flag.String("state-file", "", "Optional file path to write ready/error status JSON")
-		logLevel   = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		source      = flag.String("source", "", "Torrent source (magnet link, .torrent file path, http(s) URL, or infohash)")
+		parentPID   = flag.Int("parent-pid", 0, "PID of parent mpv process for watchdog monitoring")
+		port        = flag.Int("port", 8989, "Local HTTP port to bind to (default: 8989)")
+		cacheDir    = flag.String("cache-dir", "", "Directory to store torrent cache files")
+		keepFiles   = flag.Bool("keep-files", false, "Do not delete downloaded files on exit")
+		timeoutSec  = flag.Int("timeout", 60, "Seconds to wait for torrent metadata")
+		jsonOutput  = flag.Bool("json-output", true, "Output JSON ready banner on stdout for mpv script")
+		stateFile   = flag.String("state-file", "", "Optional file path to write ready/error status JSON")
+		logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		showVersion = flag.Bool("version", false, "Print version and exit")
+		showVersionS = flag.Bool("v", false, "Print version and exit (shorthand)")
 	)
 	flag.Parse()
+
+	if *showVersion || *showVersionS {
+		fmt.Printf("mpv-gotorrent %s\n", Version)
+		os.Exit(0)
+	}
 
 	setupLogger(*logLevel)
 
@@ -159,7 +170,7 @@ func main() {
 	if len(videoFiles) > 0 {
 		firstStream = videoFiles[0].StreamURL
 	} else if len(allFiles) > 0 {
-		firstStream = fmt.Sprintf("%s/stream/0/%s", srv.BaseURL(), url.PathEscape(allFiles[0].Name))
+		firstStream = fmt.Sprintf("%s/torrent/%s/0/%s", srv.BaseURL(), t.InfoHash().HexString(), url.PathEscape(allFiles[0].Name))
 	}
 
 	banner := ReadyBanner{
@@ -168,6 +179,7 @@ func main() {
 		BaseURL:        srv.BaseURL(),
 		PlaylistURL:    srv.BaseURL() + "/playlist",
 		FirstStreamURL: firstStream,
+		M3UPlaylist:    srv.M3UPlaylist(),
 		Name:           t.Name(),
 		InfoHash:       t.InfoHash().HexString(),
 		TotalSize:      t.Length(),
