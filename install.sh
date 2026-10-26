@@ -26,6 +26,14 @@ TARGET_VERSION="${VERSION:-latest}"
 FORCE="${FORCE:-0}"
 LOCAL_INSTALL="${LOCAL:-0}"
 CUSTOM_DIR="${MPV_DIR:-}"
+TMP_DIR=""
+
+cleanup() {
+  if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # Colors (disabled if output is not a terminal or NO_COLOR is set)
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -360,6 +368,7 @@ print_usage_tips() {
   printf "\n"
   printf "%sIn-player Controls:%s\n" "${C_BOLD}" "${C_RESET}"
   printf "  Press %sp%s in mpv to toggle live swarm download/upload stats.\n" "${C_CYAN}" "${C_RESET}"
+  printf "  Press %sCtrl+k%s in mpv to keep/save current video permanently.\n" "${C_CYAN}" "${C_RESET}"
 }
 
 # Main installer flow
@@ -392,9 +401,7 @@ main() {
   fi
 
   # Temporary working directory
-  local TMP_DIR
   TMP_DIR="$(mktemp -d -t mpv-gotorrent-install.XXXXXX)"
-  trap 'rm -rf "$TMP_DIR"' EXIT
 
   # 1. Local installation if requested
   if [ "$LOCAL_INSTALL" = "1" ]; then

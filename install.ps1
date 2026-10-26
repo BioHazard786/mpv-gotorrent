@@ -242,6 +242,9 @@ function Show-Usage([string]$TargetDir) {
     Write-Host "  Press " -NoNewline
     Write-Host "p" -ForegroundColor Cyan -NoNewline
     Write-Host " in mpv to toggle live swarm download/upload stats."
+    Write-Host "  Press " -NoNewline
+    Write-Host "Ctrl+k" -ForegroundColor Cyan -NoNewline
+    Write-Host " in mpv to keep/save current video permanently."
 }
 
 # Main Execution Flow
