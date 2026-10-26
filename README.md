@@ -95,6 +95,8 @@ mpv "https://example.com/movie.torrent"
 
 > **Desktop Tip:** You can also simply **drag & drop** any `.torrent` file or magnet link directly into an open mpv window!
 
+> 🌐 **1-Click Browser Streaming:** Stream directly from **Nyaa.si** and **1337x** without copying links! Check out our [Browser Userscripts](userscripts/README.md).
+
 ### Controls
 
 |                Key                | Action                                                                                               |

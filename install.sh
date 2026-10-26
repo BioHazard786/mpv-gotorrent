@@ -348,9 +348,39 @@ install_from_local() {
   chmod +x "${target_dir}/${bin_filename}"
   echo "$ver_stamp" > "${target_dir}/.version"
 
+  register_scheme_handler "$OS"
+
   printf "\n"
   log_ok "Successfully installed mpv-gotorrent (${C_BOLD}${ver_stamp}${C_RESET}) to ${C_BOLD}${target_dir}${C_RESET}"
   print_usage_tips "$target_dir" "$bin_filename"
+}
+
+register_scheme_handler() {
+  local os="$1"
+  if [ "$os" = "linux" ] || [ "$os" = "bsd" ]; then
+    if command -v mpv >/dev/null 2>&1; then
+      local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+      mkdir -p "$apps_dir"
+      local desktop_file="${apps_dir}/mpv-scheme.desktop"
+      cat << 'EOF' > "$desktop_file"
+[Desktop Entry]
+Type=Application
+Name=mpv Scheme Handler
+Comment=Open mpv:// URLs in mpv
+Exec=mpv %u
+Terminal=false
+NoDisplay=true
+MimeType=x-scheme-handler/mpv;
+EOF
+      if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$apps_dir" 2>/dev/null || true
+      fi
+      if command -v xdg-mime >/dev/null 2>&1; then
+        xdg-mime default mpv-scheme.desktop x-scheme-handler/mpv 2>/dev/null || true
+      fi
+      log_ok "Registered mpv:// URL protocol handler (xdg-mime)"
+    fi
+  fi
 }
 
 print_usage_tips() {
@@ -365,6 +395,7 @@ print_usage_tips() {
   printf "  mpv \"magnet:?xt=urn:btih:...\"\n"
   printf "  mpv path/to/movie.torrent\n"
   printf "  mpv \"https://example.com/stream.torrent\"\n"
+  printf "  mpv \"mpv://magnet:?xt=urn:btih:...\"\n"
   printf "\n"
   printf "%sIn-player Controls:%s\n" "${C_BOLD}" "${C_RESET}"
   printf "  Press %sp%s in mpv to toggle live swarm download/upload stats.\n" "${C_CYAN}" "${C_RESET}"
@@ -602,6 +633,8 @@ main() {
   cp -f "$EXTRACTED_BIN" "${TARGET_DIR}/${BIN_FILENAME}"
   chmod +x "${TARGET_DIR}/${BIN_FILENAME}"
   echo "$LATEST_TAG" > "${TARGET_DIR}/.version"
+
+  register_scheme_handler "$OS"
 
   # Verify installation
   if [ -x "${TARGET_DIR}/${BIN_FILENAME}" ]; then

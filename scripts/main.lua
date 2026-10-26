@@ -80,6 +80,14 @@ local function current_stream_index()
     return idx
 end
 
+-- Percent-decode a URL string
+local function url_decode(str)
+    if not str then return "" end
+    return (str:gsub("%%(%x%x)", function(hex)
+        return string.char(tonumber(hex, 16))
+    end))
+end
+
 -- Extract clean torrent source (stripping any cwd prepended by mpv)
 local function extract_torrent_source(url)
     if not url or url == "" then return nil end
@@ -89,27 +97,33 @@ local function extract_torrent_source(url)
         return nil
     end
 
-    -- 1. Magnet Link (mpv often prepends cwd e.g. /path/to/cwd/magnet:?...)
-    local magnet = url:match("(magnet:%?.+)")
+    -- Normalize percent-encoding if present
+    local clean_url = url:find("%%") and url_decode(url) or url
+
+    -- 1. Magnet Link (mpv often prepends cwd e.g. /path/to/cwd/magnet:?..., or browser turns : to /)
+    local magnet = clean_url:match("(magnet:%?.+)") or clean_url:match("(magnet/%?.+)")
     if magnet then
+        if magnet:sub(1, 8) == "magnet/?" then
+            magnet = "magnet:?" .. magnet:sub(9)
+        end
         return magnet
     end
 
     -- 2. HTTP/HTTPS URL pointing to a .torrent file
-    local remote_torrent = url:match("(https?://.*%.torrent.*)")
+    local remote_torrent = clean_url:match("(https?://.*%.torrent.*)")
     if remote_torrent then
         return remote_torrent
     end
 
     -- 3. Local or relative .torrent file
-    if url:match("%.torrent$") or url:match("%.torrent%?") then
-        return url
+    if clean_url:match("%.torrent$") or clean_url:match("%.torrent%?") then
+        return clean_url
     end
 
     -- 4. 40-character hex or 32-character base32 infohash (mpv may prepend cwd, so check the
     -- last path component; Lua patterns have no {n} quantifier). Real files are left alone.
-    if not utils.file_info(url) then
-        local name = url:match("([^/\\]+)$") or url
+    if not utils.file_info(clean_url) then
+        local name = clean_url:match("([^/\\]+)$") or clean_url
         local hash = name:match("^(" .. string.rep("%x", 40) .. ")$")
             or name:match("^(" .. string.rep("[2-7A-Za-z]", 32) .. ")$")
         if hash then

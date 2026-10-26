@@ -223,9 +223,48 @@ function Install-FromLocal([string]$TargetDir) {
     Copy-Item -Path $localBin -Destination (Join-Path $TargetDir "mpv-gotorrent.exe") -Force
     Set-Content -Path (Join-Path $TargetDir ".version") -Value $stamp -Encoding UTF8
 
+    Register-SchemeHandler
+
     Write-Host ""
     Write-Success "Successfully installed mpv-gotorrent ($stamp) to $TargetDir"
     Show-Usage $TargetDir
+}
+
+function Register-SchemeHandler {
+    try {
+        $mpvCmd = Get-Command mpv -ErrorAction SilentlyContinue
+        $mpvPath = ""
+        if ($mpvCmd) {
+            $mpvPath = $mpvCmd.Source
+        } else {
+            $candidates = @(
+                "$env:ProgramFiles\mpv\mpv.exe",
+                "${env:ProgramFiles(x86)}\mpv\mpv.exe",
+                "$env:LOCALAPPDATA\Programs\mpv\mpv.exe",
+                "$env:USERPROFILE\scoop\apps\mpv\current\mpv.exe",
+                "$env:ChocolateyInstall\bin\mpv.exe"
+            )
+            foreach ($c in $candidates) {
+                if (Test-Path $c) {
+                    $mpvPath = $c
+                    break
+                }
+            }
+        }
+
+        if ($mpvPath) {
+            $regBase = "HKCU:\Software\Classes\mpv"
+            if (-not (Test-Path "$regBase\shell\open\command")) {
+                New-Item -Path "$regBase\shell\open\command" -Force | Out-Null
+            }
+            Set-ItemProperty -Path $regBase -Name "(Default)" -Value "URL:mpv Protocol" -Force
+            Set-ItemProperty -Path $regBase -Name "URL Protocol" -Value "" -Force
+            Set-ItemProperty -Path "$regBase\shell\open\command" -Name "(Default)" -Value "`"$mpvPath`" `"%1`"" -Force
+            Write-Success "Registered mpv:// URL protocol handler in registry (HKCU)"
+        }
+    } catch {
+        Write-WarnMsg "Could not automatically register mpv:// URL protocol: $($_.Exception.Message)"
+    }
 }
 
 function Show-Usage([string]$TargetDir) {
@@ -237,6 +276,7 @@ function Show-Usage([string]$TargetDir) {
     Write-Host "  mpv ""magnet:?xt=urn:btih:..."""
     Write-Host "  mpv path\to\movie.torrent"
     Write-Host "  mpv ""https://example.com/stream.torrent"""
+    Write-Host "  mpv ""mpv://magnet:?xt=urn:btih:..."""
     Write-Host ""
     Write-Host "In-player Controls:" -ForegroundColor White
     Write-Host "  Press " -NoNewline
@@ -421,6 +461,8 @@ try {
         Copy-Item -Path $luaFile -Destination (Join-Path $TargetDir "main.lua") -Force
         Copy-Item -Path $extractedBin -Destination (Join-Path $TargetDir "mpv-gotorrent.exe") -Force
         Set-Content -Path (Join-Path $TargetDir ".version") -Value $LatestTag -Encoding UTF8
+
+        Register-SchemeHandler
 
         # Verify executable
         $verifiedPath = Join-Path $TargetDir "mpv-gotorrent.exe"
