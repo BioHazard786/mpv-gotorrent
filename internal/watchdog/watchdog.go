@@ -3,10 +3,7 @@ package watchdog
 import (
 	"context"
 	"log/slog"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 )
 
 // Watchdog oversees parent process vitality across platforms.
@@ -29,23 +26,11 @@ func New(parentPID int, onExit func()) *Watchdog {
 	}
 }
 
-// Start begins monitoring signals and parent process death.
+// Start begins monitoring parent process death. Signals are left to the caller, which needs to
+// tell "mpv exited" (may continue a kept download) apart from "asked to stop" (always exits).
 func (w *Watchdog) Start() {
 	slog.Debug("watchdog started", "parent_pid", w.parentPID)
 
-	// 1. Universal OS Signal handler (SIGINT, SIGTERM)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		select {
-		case sig := <-sigChan:
-			slog.Info("received termination signal", "signal", sig.String())
-			w.triggerExit()
-		case <-w.ctx.Done():
-		}
-	}()
-
-	// 2. Platform-specific parent process death detection
 	if w.parentPID > 1 {
 		go setupOSWatchdog(w.ctx, w.parentPID, func() {
 			slog.Info("parent process termination detected by OS monitor", "parent_pid", w.parentPID)

@@ -2,6 +2,7 @@ package streamer
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,9 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/biohazard786/mpv-gotorrent/internal/engine"
 	"github.com/biohazard786/mpv-gotorrent/internal/playlist"
 )
+
+// TokenHeader carries the per-session token required by state-changing POST endpoints.
+const TokenHeader = "X-Gotorrent-Token"
 
 // Server coordinates HTTP streaming of torrent files and metadata API.
 type Server struct {
@@ -25,11 +30,13 @@ type Server struct {
 	listener   net.Listener
 	baseURL    string
 	port       int
+	token      string
 
 	allFiles   []playlist.FileItem
 	videoFiles []playlist.FileItem
 	mu         sync.RWMutex
 	stopChan   chan struct{}
+	stopOnce   sync.Once
 }
 
 // MetadataResponse contains high-level torrent and file metadata.
@@ -79,6 +86,7 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 		listener:   listener,
 		baseURL:    baseURL,
 		port:       actualPort,
+		token:      rand.Text(),
 		stopChan:   make(chan struct{}),
 	}
 
@@ -97,10 +105,13 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 	mux.HandleFunc("/playlist", s.handlePlaylist)
 	mux.HandleFunc("/meta", s.handleMeta)
 	mux.HandleFunc("/status", s.handleStatus)
+	mux.HandleFunc("/keep", s.handleKeep)
+	mux.HandleFunc("/media", s.handleMedia)
+	mux.HandleFunc("/prefetch", s.handlePrefetch)
 	mux.HandleFunc("/shutdown", s.handleShutdown)
 
 	s.httpServer = &http.Server{
-		Handler:      mux,
+		Handler:      s.guard(mux),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 0, // Streaming needs unbounded write time
 		IdleTimeout:  120 * time.Second,
@@ -108,6 +119,32 @@ func NewServer(eng *engine.Engine, requestedPort int) (*Server, error) {
 
 	slog.Info("HTTP streaming server initialized", "base_url", baseURL, "port", actualPort)
 	return s, nil
+}
+
+// guard rejects requests whose Host isn't this loopback server, which blocks DNS-rebinding
+// attacks from web pages, and requires the session token on POST endpoints so a page can't
+// trigger /keep or /shutdown with a cross-site form post.
+func (s *Server) guard(next http.Handler) http.Handler {
+	allowedHosts := map[string]bool{
+		fmt.Sprintf("127.0.0.1:%d", s.port): true,
+		fmt.Sprintf("localhost:%d", s.port): true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowedHosts[r.Host] {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodPost && r.Header.Get(TokenHeader) != s.token {
+			http.Error(w, "invalid or missing token", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Token returns the per-session token clients must send in TokenHeader on POST requests.
+func (s *Server) Token() string {
+	return s.token
 }
 
 // Start begins serving HTTP requests in the background.
@@ -226,6 +263,8 @@ func (s *Server) serveTorrentStream(w http.ResponseWriter, r *http.Request, file
 		return
 	}
 
+	s.engine.PrioritizeFile(fileIdx)
+
 	targetFile := files[fileIdx]
 	rangeHeader := r.Header.Get("Range")
 	slog.Debug("streaming file chunk",
@@ -238,8 +277,11 @@ func (s *Server) serveTorrentStream(w http.ResponseWriter, r *http.Request, file
 	reader := targetFile.NewReader()
 	defer reader.Close()
 
-	// Prioritize a 32MB sliding window ahead of read pointer
-	reader.SetReadahead(32 * 1024 * 1024)
+	// Prioritize a sliding window ahead of the read pointer. It is re-evaluated on every read, so
+	// it grows from the default to a bitrate-sized window once mpv reports the file's duration.
+	reader.SetReadaheadFunc(func(torrent.ReadaheadContext) int64 {
+		return s.engine.Readahead(fileIdx)
+	})
 	reader.SetResponsive()
 
 	// Content-Type determination
@@ -381,9 +423,89 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		select {
-		case s.stopChan <- struct{}{}:
-		default:
-		}
+		s.stopOnce.Do(func() { close(s.stopChan) })
 	}()
 }
+
+// handleMedia receives a file's playback duration from mpv, which sizes its readahead by bitrate.
+func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	fileIdx, err := strconv.Atoi(r.URL.Query().Get("file_idx"))
+	if err != nil {
+		http.Error(w, "invalid file index", http.StatusBadRequest)
+		return
+	}
+	duration, err := strconv.ParseFloat(r.URL.Query().Get("duration"), 64)
+	if err != nil {
+		http.Error(w, "invalid duration", http.StatusBadRequest)
+		return
+	}
+
+	bitrate, err := s.engine.SetFileDuration(fileIdx, duration)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int64{
+		"bitrate":   bitrate,
+		"readahead": s.engine.Readahead(fileIdx),
+	})
+}
+
+// handlePrefetch starts downloading the opening of a file mpv will play next.
+func (s *Server) handlePrefetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	fileIdx, err := strconv.Atoi(r.URL.Query().Get("file_idx"))
+	if err != nil {
+		http.Error(w, "invalid file index", http.StatusBadRequest)
+		return
+	}
+
+	queued, err := s.engine.PrefetchFile(fileIdx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int64{"file_idx": int64(fileIdx), "bytes": queued})
+}
+
+func (s *Server) handleKeep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = "current"
+	}
+
+	targetDir := r.URL.Query().Get("dir")
+	fileIdxStr := r.URL.Query().Get("file_idx")
+	fileIdx := -1
+	if fileIdxStr != "" {
+		if idx, err := strconv.Atoi(fileIdxStr); err == nil {
+			fileIdx = idx
+		}
+	}
+
+	status, err := s.engine.KeepCurrent(scope, targetDir, fileIdx)
+	w.Header().Set("Content-Type", "application/json")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = json.NewEncoder(w).Encode(status)
+}
+

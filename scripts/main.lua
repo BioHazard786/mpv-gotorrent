@@ -15,10 +15,19 @@ local opts = {
     port = 8989,                -- Preferred deterministic HTTP port (default: 8989)
     cache_dir = "",             -- Custom cache directory (blank = system default)
     keep_files = false,         -- Keep downloaded files on exit (default false = auto cleanup)
+    max_ram_mb = 0,             -- Max RAM in MB for memory-only ring buffer (0 = use disk cache)
+    keep_dir = "",              -- Target folder for kept files (blank = ~/Videos or ~/Downloads)
+    keep_scope = "current",     -- 'current' (active video only) or 'all' (entire torrent)
+    detach_on_keep = true,      -- Finish downloading kept files in background when mpv exits
     timeout = 60,               -- Metadata resolution timeout in seconds
     auto_playlist = true,       -- Auto-playlist mode for multi-file torrents (default: true)
     show_osd = true,            -- Show OSD messages on loading
     osd_duration = 3,           -- Seconds to display loading notices
+    prefetch_next_at = 80,      -- Start downloading the next episode at this % of the current one (0 = off)
+
+    -- Key bindings (blank = no default key; input.conf can still bind the script-binding names)
+    key_stats = "p",            -- Toggle stats overlay (script-binding gotorrent-stats)
+    key_keep = "ctrl+k",        -- Keep current file (script-binding gotorrent-keep)
 
     -- Advanced ASS Text Styling (uses mpv default font and clean sizing)
     font = "",                  -- Blank = use mpv default font
@@ -27,8 +36,8 @@ local opts = {
     border_size = 1.2,
     border_color = "151515",    -- Dark border
     shadow_color = "000000",
-    accent_color = "00F0FF",    -- Cyan accent
-    progress_color = "33FF66",  -- Green accent
+    accent_color = "C7A314",    -- Cyan accent
+    progress_color = "91C714",  -- Green accent
 }
 
 options.read_options(opts, "gotorrent")
@@ -53,6 +62,22 @@ local function extract_resume_infohash(url)
     local hash = url:match("https?://127%.0%.0%.1:%d+/torrent/([0-9a-fA-F]+)")
     if hash then return hash:lower() end
     return nil
+end
+
+-- Split a gotorrent stream URL into its infohash and file index
+local function stream_location(url)
+    if not url then return nil end
+    local hash, idx = url:match("^https?://127%.0%.0%.1:%d+/torrent/([0-9a-fA-F]+)/([0-9]+)/")
+    if not hash then return nil end
+    return hash:lower(), tonumber(idx)
+end
+
+-- Return the file index of the current stream if it belongs to the active companion
+local function current_stream_index()
+    if not current_server or not current_server.base_url then return nil end
+    local hash, idx = stream_location(mp.get_property("path"))
+    if hash ~= current_server.infohash then return nil end
+    return idx
 end
 
 -- Extract clean torrent source (stripping any cwd prepended by mpv)
@@ -81,13 +106,41 @@ local function extract_torrent_source(url)
         return url
     end
 
-    -- 4. 40-character hex or 32-character base32 infohash
-    local hash = url:match("([0-9a-fA-F]{40})$") or url:match("([2-7a-zA-Z]{32})$")
-    if hash then
-        return "magnet:?xt=urn:btih:" .. hash
+    -- 4. 40-character hex or 32-character base32 infohash (mpv may prepend cwd, so check the
+    -- last path component; Lua patterns have no {n} quantifier). Real files are left alone.
+    if not utils.file_info(url) then
+        local name = url:match("([^/\\]+)$") or url
+        local hash = name:match("^(" .. string.rep("%x", 40) .. ")$")
+            or name:match("^(" .. string.rep("[2-7A-Za-z]", 32) .. ")$")
+        if hash then
+            return "magnet:?xt=urn:btih:" .. hash
+        end
     end
 
     return nil
+end
+
+-- Percent-encode a string for use in a URL query parameter
+local function url_encode(str)
+    return (tostring(str):gsub("[^%w%-%._~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- POST to a companion endpoint asynchronously, authenticating with the session token
+local function companion_post(url, callback)
+    local args = {"curl", "-s", "-X", "POST"}
+    if current_server and current_server.token then
+        table.insert(args, "-H")
+        table.insert(args, "X-Gotorrent-Token: " .. current_server.token)
+    end
+    table.insert(args, url)
+    mp.command_native_async({
+        name = "subprocess",
+        playback_only = false,
+        capture_stdout = callback ~= nil,
+        args = args,
+    }, callback)
 end
 
 -- Locate companion binary in script directory or fallback paths
@@ -161,20 +214,15 @@ local function hide_overlay()
     end
 end
 
--- Terminate previous companion server if running
+-- Ask the previous companion server to stop. It is never killed: it cleans up its cache itself,
+-- or finishes a kept download in the background first. If the request is lost, the companion
+-- still notices when mpv exits.
 local function stop_active_companion()
     hide_overlay()
     if current_server then
         if current_server.base_url then
             msg.info("Requesting shutdown for companion on " .. current_server.base_url)
-            mp.command_native_async({
-                name = "subprocess",
-                playback_only = false,
-                args = {"curl", "-s", "-X", "POST", current_server.base_url .. "/shutdown"}
-            })
-        end
-        if current_server.cmd_id then
-            mp.abort_async_command(current_server.cmd_id)
+            companion_post(current_server.base_url .. "/shutdown")
         end
         current_server = nil
         active_torrent = nil
@@ -198,7 +246,7 @@ local function launch_companion(source, hook, callback)
         "--port=" .. tostring(opts.port or 8989),
         "--timeout=" .. tostring(opts.timeout or 60),
         "--state-file=" .. state_file_path,
-        "--json-output=true",
+        "--json-output=false",
     }
 
     if opts.cache_dir ~= "" then
@@ -207,16 +255,30 @@ local function launch_companion(source, hook, callback)
     if opts.keep_files then
         table.insert(args, "--keep-files=true")
     end
+    if opts.max_ram_mb and opts.max_ram_mb > 0 then
+        table.insert(args, "--max-ram-mb=" .. tostring(opts.max_ram_mb))
+    end
+    if opts.keep_dir and opts.keep_dir ~= "" then
+        table.insert(args, "--keep-dir=" .. opts.keep_dir)
+    end
+    if opts.keep_scope and opts.keep_scope ~= "" then
+        table.insert(args, "--keep-scope=" .. opts.keep_scope)
+    end
+    if opts.detach_on_keep ~= nil then
+        table.insert(args, "--detach-on-keep=" .. tostring(opts.detach_on_keep))
+    end
 
     msg.info("Spawning companion binary: " .. bin_path .. " (source: " .. source .. ")")
 
-    local cmd_id = mp.command_native_async({
+    -- Detached so mpv can't SIGKILL it on quit; the companion watches mpv's PID instead
+    mp.command_native_async({
         name = "subprocess",
         playback_only = false,
+        detach = true,
         args = args,
     }, function(success, res, err)
-        if not success or (res and res.status ~= 0) then
-            msg.warn("Companion process exited or terminated.")
+        if not success then
+            msg.warn("Failed to start companion: " .. tostring(err))
         end
     end)
 
@@ -243,7 +305,7 @@ local function launch_companion(source, hook, callback)
                     current_server = {
                         port = parsed.port,
                         base_url = parsed.base_url,
-                        cmd_id = cmd_id,
+                        token = parsed.token,
                         infohash = parsed.infohash and parsed.infohash:lower(),
                     }
                     active_torrent = {
@@ -300,6 +362,9 @@ mp.add_hook("on_load", 10, function(hook)
         launch_companion(resume_hash, hook, function(success, data)
             if success then
                 msg.info("Companion reconnected for infohash: " .. resume_hash)
+                -- The new companion may have bound a different port than the saved URL
+                local new_url = raw_url:gsub("^https?://127%.0%.0%.1:%d+", function() return data.base_url end)
+                mp.set_property("stream-open-filename", new_url)
             end
             hook:cont()
         end)
@@ -360,8 +425,7 @@ end)
 mp.register_event("file-loaded", function()
     if not active_torrent or not active_torrent.videos then return end
 
-    local current_path = mp.get_property("path", "")
-    local target_idx = tonumber(current_path:match("/torrent/[0-9a-fA-F]+/([0-9]+)"))
+    local target_idx = current_stream_index()
 
     local matched_video = nil
     if target_idx ~= nil then
@@ -391,7 +455,37 @@ mp.register_event("file-loaded", function()
     end
 end)
 
--- Refresh and render ASS styled OSD overlay (Key: 'P')
+-- Report each file's duration so the companion can size its readahead from the bitrate.
+-- Observed rather than read on file-loaded because some containers only know it later.
+local duration_reported_path = nil
+mp.observe_property("duration", "number", function(_, duration)
+    if not duration or duration <= 0 then return end
+    local path = mp.get_property("path")
+    local idx = current_stream_index()
+    if not idx or path == duration_reported_path then return end
+    duration_reported_path = path
+    companion_post(string.format("%s/media?file_idx=%d&duration=%.3f", current_server.base_url, idx, duration))
+end)
+
+-- Prefetch the opening of the next playlist entry once the current one is far enough along,
+-- so the next episode starts without waiting for the swarm
+local prefetched_path = nil
+mp.observe_property("percent-pos", "number", function(_, pct)
+    if not pct or opts.prefetch_next_at <= 0 or pct < opts.prefetch_next_at then return end
+    local path = mp.get_property("path")
+    if path == prefetched_path or not current_stream_index() then return end
+    prefetched_path = path
+
+    local pos = mp.get_property_number("playlist-pos", -1)
+    if pos < 0 then return end
+    local next_hash, next_idx = stream_location(mp.get_property("playlist/" .. (pos + 1) .. "/filename"))
+    if not next_hash or next_hash ~= current_server.infohash then return end
+
+    msg.info(string.format("Prefetching next episode (file %d)", next_idx))
+    companion_post(string.format("%s/prefetch?file_idx=%d", current_server.base_url, next_idx))
+end)
+
+-- Refresh and render ASS styled OSD overlay (key_stats)
 local function refresh_osd_overlay()
     if not osd_active or not current_server or not current_server.base_url then
         return
@@ -430,16 +524,40 @@ local function refresh_osd_overlay()
         local c_white = "{\\1c&HFFFFFF&}"
 
         local bar = format_progress_bar(stats.progress, 20)
+
+        local storage_line = ""
+        if stats.storage_mode == "ram" then
+            storage_line = string.format("Storage:   " .. c_cyan .. "RAM Ring Buffer [%s / %s]" .. c_white .. "\\N",
+                format_bytes(stats.ram_used_bytes or 0),
+                format_bytes(stats.ram_max_bytes or 0)
+            )
+        else
+            storage_line = "Storage:   Disk Cache\\N"
+        end
+
+        local keep_line = ""
+        if stats.keep_active then
+            local keep_dest = stats.keep_path or "~/Videos"
+            keep_line = string.format("Keep:      " .. c_green .. "Saving to %s (%.1f%%)" .. c_white .. "\\N",
+                keep_dest,
+                stats.keep_progress or 0
+            )
+        end
+
         local ass_content = string.format(
             "%s" ..
             c_cyan .. "[● BitTorrent Stream]" .. c_white .. "\\N" ..
             "Torrent:   %s\\N" ..
+            "%s" ..
+            "%s" ..
             "Speed:     " .. c_cyan .. "↓ %s" .. c_white .. "   " .. c_green .. "↑ %s" .. c_white .. "\\N" ..
             "Swarm:     Peers: %d (Active: %d)\\N" ..
             "Progress:  " .. c_green .. "%s %.1f%%" .. c_white .. "\\N" ..
             "Pieces:    %d / %d (%s / %s)",
             style_header,
             stats.name or "Streaming",
+            storage_line,
+            keep_line,
             format_speed(stats.download_speed or 0),
             format_speed(stats.upload_speed or 0),
             stats.peers or 0,
@@ -457,7 +575,7 @@ local function refresh_osd_overlay()
     end)
 end
 
--- Toggle OSD Overlay on/off (Key: 'p')
+-- Toggle OSD Overlay on/off (key_stats)
 local function toggle_stats_overlay()
     if not current_server or not current_server.base_url then
         mp.osd_message("mpv-gotorrent: Not currently streaming a torrent.", 2)
@@ -475,7 +593,55 @@ local function toggle_stats_overlay()
     end
 end
 
-mp.add_key_binding("p", "gotorrent-stats", toggle_stats_overlay)
+-- Trigger "Keep File" (key_keep)
+local function trigger_keep_file()
+    if not current_server or not current_server.base_url then
+        mp.osd_message("mpv-gotorrent: Not currently streaming a torrent.", 2)
+        return
+    end
+
+    local file_idx = current_stream_index() or ""
+
+    local url = string.format("%s/keep?scope=%s&dir=%s&file_idx=%s",
+        current_server.base_url,
+        url_encode(opts.keep_scope or "current"),
+        url_encode(opts.keep_dir or ""),
+        file_idx
+    )
+
+    companion_post(url, function(success, res)
+        if not success or not res or res.status ~= 0 or not res.stdout then
+            mp.osd_message("mpv-gotorrent: Failed to request keep.", 3)
+            return
+        end
+
+        local data = utils.parse_json(res.stdout)
+        if not data then return end
+
+        if data.status == "keeping" then
+            local pct = data.progress or 0
+            local name = data.name or "file"
+            local dest = data.dest_path or "~/Videos"
+            mp.osd_message(string.format("💾 Keeping file: %s (%.1f%%)\nSaving to: %s", name, pct, dest), 4)
+            if osd_active then refresh_osd_overlay() end
+        elseif data.status == "already_keeping" then
+            mp.osd_message(string.format("ℹ️ Already saving %s (%.1f%%)\nTarget: %s", data.name or "file", data.progress or 0, data.dest_path or "~/Videos"), 3)
+        elseif data.status == "completed" then
+            mp.osd_message(string.format(" File already saved: %s", data.dest_path or ""), 3)
+        else
+            mp.osd_message("mpv-gotorrent: " .. (data.message or "Keep requested"), 3)
+        end
+    end)
+end
+
+-- A blank key registers the binding without a default so input.conf can still map it
+local function key_or_nil(key)
+    if not key or key == "" then return nil end
+    return key
+end
+
+mp.add_key_binding(key_or_nil(opts.key_stats), "gotorrent-stats", toggle_stats_overlay)
+mp.add_key_binding(key_or_nil(opts.key_keep), "gotorrent-keep", trigger_keep_file)
 
 -- Cleanup on mpv shutdown
 mp.register_event("shutdown", stop_active_companion)

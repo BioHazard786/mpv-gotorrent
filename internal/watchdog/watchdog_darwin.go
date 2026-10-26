@@ -38,7 +38,7 @@ func setupOSWatchdog(ctx context.Context, parentPID int, onExit func()) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := syscall.Kill(parentPID, 0); err != nil {
+			if err := syscall.Kill(parentPID, 0); err == syscall.ESRCH {
 				onExit()
 				return
 			}

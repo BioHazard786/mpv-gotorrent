@@ -166,7 +166,7 @@ func (tm *TrackerManager) updateInBackground() {
 func (tm *TrackerManager) saveTrackers(trackers []string) error {
 	_ = os.MkdirAll(tm.cacheDir, 0755)
 	path := tm.trackersFilePath()
-	tmpPath := path + ".tmp"
+	tmpPath := tempPathFor(path)
 
 	data := strings.Join(trackers, "\n") + "\n"
 	if err := os.WriteFile(tmpPath, []byte(data), 0644); err != nil {

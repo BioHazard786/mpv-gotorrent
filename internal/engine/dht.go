@@ -97,7 +97,7 @@ func (dm *DHTManager) SaveNodes() error {
 
 	_ = os.MkdirAll(dm.cacheDir, 0755)
 	destPath := filepath.Join(dm.cacheDir, "dht.nodes")
-	tmpPath := destPath + ".tmp"
+	tmpPath := tempPathFor(destPath)
 
 	if err := dht.WriteNodesToFile(validNodes, tmpPath); err != nil {
 		slog.Debug("failed to write DHT nodes to temporary file", "err", err)

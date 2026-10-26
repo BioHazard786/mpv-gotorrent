@@ -9,7 +9,7 @@ all: build
 
 build:
 	@mkdir -p bin
-	go build -ldflags="$(LDFLAGS)" -o bin/$(BIN_NAME) ./cmd/$(BIN_NAME)
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/$(BIN_NAME) ./cmd/$(BIN_NAME)
 	@echo "Built bin/$(BIN_NAME) (version $(VERSION))"
 
 test:

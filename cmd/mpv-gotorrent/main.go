@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/biohazard786/mpv-gotorrent/internal/engine"
@@ -31,20 +33,31 @@ type ReadyBanner struct {
 	VideosCount    int         `json:"videos_count"`
 	FilesCount     int         `json:"files_count"`
 	Videos         interface{} `json:"videos"`
+	StorageMode    string      `json:"storage_mode"`
+	Token          string      `json:"token,omitempty"`
 	Error          string      `json:"error,omitempty"`
 }
 
+// writeStateFile writes via a temp file and rename so the polling Lua script never reads a
+// half-written file. It is private to the user since it carries the session token.
 func writeStateFile(filePath string, data interface{}) {
 	if filePath == "" {
 		return
 	}
-	f, err := os.Create(filePath)
+	payload, err := json.Marshal(data)
 	if err != nil {
+		slog.Error("failed to encode state file", "err", err)
+		return
+	}
+	tmpPath := filePath + ".tmp"
+	if err := os.WriteFile(tmpPath, payload, 0600); err != nil {
 		slog.Error("failed to create state file", "path", filePath, "err", err)
 		return
 	}
-	defer f.Close()
-	_ = json.NewEncoder(f).Encode(data)
+	if err := os.Rename(tmpPath, filePath); err != nil {
+		_ = os.Remove(tmpPath)
+		_ = os.WriteFile(filePath, payload, 0600)
+	}
 }
 
 func parseLogLevel(lvl string) slog.Level {
@@ -79,16 +92,20 @@ var Version = "dev"
 
 func main() {
 	var (
-		source      = flag.String("source", "", "Torrent source (magnet link, .torrent file path, http(s) URL, or infohash)")
-		parentPID   = flag.Int("parent-pid", 0, "PID of parent mpv process for watchdog monitoring")
-		port        = flag.Int("port", 8989, "Local HTTP port to bind to (default: 8989)")
-		cacheDir    = flag.String("cache-dir", "", "Directory to store torrent cache files")
-		keepFiles   = flag.Bool("keep-files", false, "Do not delete downloaded files on exit")
-		timeoutSec  = flag.Int("timeout", 60, "Seconds to wait for torrent metadata")
-		jsonOutput  = flag.Bool("json-output", true, "Output JSON ready banner on stdout for mpv script")
-		stateFile   = flag.String("state-file", "", "Optional file path to write ready/error status JSON")
-		logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		showVersion = flag.Bool("version", false, "Print version and exit")
+		source       = flag.String("source", "", "Torrent source (magnet link, .torrent file path, http(s) URL, or infohash)")
+		parentPID    = flag.Int("parent-pid", 0, "PID of parent mpv process for watchdog monitoring")
+		port         = flag.Int("port", 8989, "Local HTTP port to bind to (default: 8989)")
+		cacheDir     = flag.String("cache-dir", "", "Directory to store torrent cache files")
+		keepFiles    = flag.Bool("keep-files", false, "Do not delete downloaded files on exit")
+		maxRAMMB     = flag.Int("max-ram-mb", 0, "Max RAM in MB for memory-only ring buffer (0 = use disk cache)")
+		keepDir      = flag.String("keep-dir", "", "Default directory to save kept torrent files (default: ~/Videos)")
+		keepScope    = flag.String("keep-scope", "current", "Keep scope ('current' file or 'all' files)")
+		detachOnKeep = flag.Bool("detach-on-keep", true, "Continue downloading in background when mpv closes if kept")
+		timeoutSec   = flag.Int("timeout", 60, "Seconds to wait for torrent metadata")
+		jsonOutput   = flag.Bool("json-output", true, "Output JSON ready banner on stdout for mpv script")
+		stateFile    = flag.String("state-file", "", "Optional file path to write ready/error status JSON")
+		logLevel     = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		showVersion  = flag.Bool("version", false, "Print version and exit")
 		showVersionS = flag.Bool("v", false, "Print version and exit (shorthand)")
 	)
 	flag.Parse()
@@ -110,6 +127,7 @@ func main() {
 	slog.Info("starting mpv-gotorrent companion",
 		"parent_pid", *parentPID,
 		"keep_files", *keepFiles,
+		"max_ram_mb", *maxRAMMB,
 		"timeout", fmt.Sprintf("%ds", *timeoutSec),
 	)
 
@@ -126,13 +144,21 @@ func main() {
 		}
 	}
 
-	wd := watchdog.New(*parentPID, cleanup)
+	// The watchdog only reports that mpv exited; whether to shut down or keep downloading in the
+	// background is decided below, after it fires.
+	wd := watchdog.New(*parentPID, nil)
 	wd.Start()
+
+	ctx, stopSignals := signal.NotifyContext(wd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	var err error
 	eng, err = engine.NewEngine(engine.Config{
 		DataDir:   *cacheDir,
 		KeepFiles: *keepFiles,
+		MaxRAMMB:  *maxRAMMB,
+		KeepDir:   *keepDir,
+		KeepScope: *keepScope,
 		Port:      0, // Random BitTorrent peer port
 	})
 	if err != nil {
@@ -141,7 +167,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	metaCtx, metaCancel := context.WithTimeout(wd.Context(), time.Duration(*timeoutSec)*time.Second)
+	metaCtx, metaCancel := context.WithTimeout(ctx, time.Duration(*timeoutSec)*time.Second)
 	defer metaCancel()
 
 	slog.Info("fetching torrent metadata from swarm", "source", *source)
@@ -186,6 +212,8 @@ func main() {
 		VideosCount:    len(videoFiles),
 		FilesCount:     len(allFiles),
 		Videos:         videoFiles,
+		StorageMode:    eng.Stats().StorageMode,
+		Token:          srv.Token(),
 	}
 
 	slog.Info("stream ready",
@@ -195,6 +223,7 @@ func main() {
 		"videos", banner.VideosCount,
 		"stream_url", banner.FirstStreamURL,
 		"playlist_url", banner.PlaylistURL,
+		"storage_mode", banner.StorageMode,
 	)
 
 	writeStateFile(*stateFile, banner)
@@ -207,12 +236,36 @@ func main() {
 		_ = os.Stdout.Sync()
 	}
 
-	// Wait for termination signal or watchdog cancellation
+	// Wait for mpv to exit, mpv to ask us to stop (e.g. it switched torrents), or a signal
 	select {
-	case <-wd.Context().Done():
-		slog.Info("watchdog context triggered termination")
+	case <-ctx.Done():
+		if wd.Context().Err() == nil {
+			// An explicit signal always stops, even mid-keep
+			slog.Info("received termination signal")
+			cleanup()
+			return
+		}
+		slog.Info("parent mpv process exited")
 	case <-srv.StopChan():
 		slog.Info("HTTP shutdown endpoint requested termination")
+	}
+	stopSignals()
+
+	if *detachOnKeep && eng.IsKeepActive() && !eng.IsKeepCompleted() {
+		slog.Info("detaching to complete kept download in background", "dest", eng.KeepPath())
+		engine.SendNotification("mpv-gotorrent", fmt.Sprintf("Continuing background download of %s...", eng.KeepName()))
+
+		// Release HTTP streamer port so next mpv session can use it immediately
+		_ = srv.Stop()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		select {
+		case <-eng.WaitKeepComplete():
+			slog.Info("background keep download finished successfully")
+		case sig := <-sigChan:
+			slog.Info("background download interrupted by signal", "signal", sig.String())
+		}
 	}
 
 	cleanup()
