@@ -259,7 +259,7 @@ function Register-SchemeHandler {
             }
             Set-ItemProperty -Path $regBase -Name "(Default)" -Value "URL:mpv Protocol" -Force
             Set-ItemProperty -Path $regBase -Name "URL Protocol" -Value "" -Force
-            Set-ItemProperty -Path "$regBase\shell\open\command" -Name "(Default)" -Value "`"$mpvPath`" `"%1`"" -Force
+            Set-ItemProperty -Path "$regBase\shell\open\command" -Name "(Default)" -Value "`"$mpvPath`" --force-window=immediate `"%1`"" -Force
             Write-Success "Registered mpv:// URL protocol handler in registry (HKCU)"
         }
     } catch {

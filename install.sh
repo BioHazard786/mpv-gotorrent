@@ -367,7 +367,7 @@ register_scheme_handler() {
 Type=Application
 Name=mpv Scheme Handler
 Comment=Open mpv:// URLs in mpv
-Exec=mpv %u
+Exec=mpv --force-window=immediate %u
 Terminal=false
 NoDisplay=true
 MimeType=x-scheme-handler/mpv;

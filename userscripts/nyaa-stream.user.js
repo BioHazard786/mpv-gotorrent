@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Nyaa.si - Stream in MPV (mpv-gotorrent)
 // @namespace    https://github.com/biohazard786/mpv-gotorrent
-// @version      1.0.1
+// @version      1.0.2
 // @description  Adds a 1-click button to stream torrents directly in MPV using mpv-gotorrent
 // @author       BioHazard786
 // @match        https://nyaa.si/*
@@ -32,6 +32,14 @@
             // Inherit Nyaa's native link styling and FontAwesome icon
             btn.innerHTML = '<i class="fa fa-fw fa-play-circle"></i>';
 
+            btn.addEventListener('click', () => {
+                const icon = btn.querySelector('i');
+                if (icon) {
+                    icon.className = 'fa fa-fw fa-spinner fa-spin';
+                    setTimeout(() => { icon.className = 'fa fa-fw fa-play-circle'; }, 3000);
+                }
+            });
+
             // Spacing matches native layout between download and magnet links
             magnet.parentNode.appendChild(document.createTextNode(' '));
             magnet.parentNode.appendChild(btn);
@@ -51,6 +59,12 @@
             btn.href = 'mpv://' + magnet.href;
             btn.title = 'Play in MPV (mpv-gotorrent)';
             btn.innerHTML = '<i class="fa fa-play fa-fw"></i>Play in MPV';
+
+            btn.addEventListener('click', () => {
+                const orig = btn.innerHTML;
+                btn.innerHTML = '<i class="fa fa-spinner fa-spin fa-fw"></i>Opening MPV...';
+                setTimeout(() => { btn.innerHTML = orig; }, 3000);
+            });
 
             // Nyaa details page separates actions with " or "
             const separator = document.createTextNode(' or ');

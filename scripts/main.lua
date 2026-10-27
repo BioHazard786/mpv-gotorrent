@@ -100,13 +100,13 @@ local function extract_torrent_source(url)
     -- Normalize percent-encoding if present
     local clean_url = url:find("%%") and url_decode(url) or url
 
-    -- 1. Magnet Link (mpv often prepends cwd e.g. /path/to/cwd/magnet:?..., or browser turns : to /)
-    local magnet = clean_url:match("(magnet:%?.+)") or clean_url:match("(magnet/%?.+)")
-    if magnet then
-        if magnet:sub(1, 8) == "magnet/?" then
-            magnet = "magnet:?" .. magnet:sub(9)
+    -- 1. Magnet Link (handles magnet:?, magnet/? or URI-normalized magnet? from desktop/browser handlers)
+    local raw_magnet = clean_url:match("(magnet[:/%?].+)")
+    if raw_magnet then
+        local query_start = raw_magnet:find("%?")
+        if query_start then
+            return "magnet:" .. raw_magnet:sub(query_start)
         end
-        return magnet
     end
 
     -- 2. HTTP/HTTPS URL pointing to a .torrent file

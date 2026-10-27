@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1337x - Stream in MPV (mpv-gotorrent)
 // @namespace    https://github.com/biohazard786/mpv-gotorrent
-// @version      1.0.2
+// @version      1.0.3
 // @description  Adds a 1-click button to stream torrents directly in MPV using mpv-gotorrent
 // @author       BioHazard786
 // @match        https://1337x.to/*
@@ -43,8 +43,17 @@
             btn.href = 'mpv://' + detailMagnet.href;
             btn.title = 'Play in MPV (mpv-gotorrent)';
 
+            const playIconSvg = '<span class="icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="#ffffff" style="vertical-align: middle; display: inline-block; margin-top: -2px;"><polygon points="7,4 19,12 7,20"/></svg></span>';
+
             // Replicate the native <span class="icon"> box with a crisp white play icon
-            btn.innerHTML = '<span class="icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="#ffffff" style="vertical-align: middle; display: inline-block; margin-top: -2px;"><polygon points="7,4 19,12 7,20"/></svg></span>Play in MPV';
+            btn.innerHTML = playIconSvg + 'Play in MPV';
+
+            btn.addEventListener('click', () => {
+                btn.innerHTML = playIconSvg + 'Opening MPV...';
+                setTimeout(() => {
+                    btn.innerHTML = playIconSvg + 'Play in MPV';
+                }, 3000);
+            });
 
             const parentLi = detailMagnet.closest('li');
             if (parentLi && parentLi.parentNode) {
@@ -97,7 +106,9 @@
 
                 // If already fetched on this row, launch directly
                 if (playBtn.dataset.magnet) {
+                    playBtn.innerHTML = '⏳';
                     window.location.href = 'mpv://' + playBtn.dataset.magnet;
+                    setTimeout(() => { playBtn.innerHTML = '▶'; }, 2000);
                     return;
                 }
 
