@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Nyaa.si - Stream in MPV (mpv-gotorrent)
+// @name         Nyaa.si - Stream in MPV / IINA (mpv-gotorrent)
 // @namespace    https://github.com/biohazard786/mpv-gotorrent
-// @version      1.0.2
-// @description  Adds a 1-click button to stream torrents directly in MPV using mpv-gotorrent
+// @version      1.1.0
+// @description  Adds a 1-click button to stream torrents directly in MPV or IINA using mpv-gotorrent
 // @author       BioHazard786
 // @match        https://nyaa.si/*
 // @match        https://*.nyaa.si/*
@@ -16,7 +16,27 @@
 (function () {
     'use strict';
 
+    function getPlayer() {
+        return (localStorage.getItem('gotorrent_player') || 'mpv').toLowerCase();
+    }
+
+    function formatStreamUrl(magnet, forcePlayer) {
+        const player = forcePlayer || getPlayer();
+        if (player === 'iina') {
+            return 'iina://weblink?url=' + encodeURIComponent(magnet);
+        }
+        return 'mpv://' + magnet;
+    }
+
+    function getPlayerLabel(player) {
+        return player === 'iina' ? 'IINA' : 'MPV';
+    }
+
     function addButtons() {
+        const defaultPlayer = getPlayer();
+        const altPlayer = defaultPlayer === 'iina' ? 'mpv' : 'iina';
+        const titleText = `Stream in ${getPlayerLabel(defaultPlayer)} (Hold Alt/⌥ for ${getPlayerLabel(altPlayer)})`;
+
         // 1. Table listings (Search / Browse / User pages)
         const rows = document.querySelectorAll('table.torrent-list tbody tr');
         rows.forEach(row => {
@@ -27,12 +47,15 @@
 
             const btn = document.createElement('a');
             btn.className = 'mpv-stream-btn';
-            btn.href = 'mpv://' + magnet.href;
-            btn.title = 'Play in MPV';
+            btn.href = formatStreamUrl(magnet.href, defaultPlayer);
+            btn.title = titleText;
             // Inherit Nyaa's native link styling and FontAwesome icon
             btn.innerHTML = '<i class="fa fa-fw fa-play-circle"></i>';
 
-            btn.addEventListener('click', () => {
+            btn.addEventListener('click', (e) => {
+                const activePlayer = e.altKey ? altPlayer : defaultPlayer;
+                btn.href = formatStreamUrl(magnet.href, activePlayer);
+
                 const icon = btn.querySelector('i');
                 if (icon) {
                     icon.className = 'fa fa-fw fa-spinner fa-spin';
@@ -54,15 +77,17 @@
             if (!magnet) return;
 
             const btn = document.createElement('a');
-            // Inherit Nyaa's native button classes (e.g. card-footer-item or btn)
             btn.className = (magnet.className ? magnet.className + ' ' : '') + 'mpv-stream-btn';
-            btn.href = 'mpv://' + magnet.href;
-            btn.title = 'Play in MPV (mpv-gotorrent)';
-            btn.innerHTML = '<i class="fa fa-play fa-fw"></i>Play in MPV';
+            btn.href = formatStreamUrl(magnet.href, defaultPlayer);
+            btn.title = titleText;
+            btn.innerHTML = `<i class="fa fa-play fa-fw"></i>Play in ${getPlayerLabel(defaultPlayer)}`;
 
-            btn.addEventListener('click', () => {
+            btn.addEventListener('click', (e) => {
+                const activePlayer = e.altKey ? altPlayer : defaultPlayer;
+                btn.href = formatStreamUrl(magnet.href, activePlayer);
+
                 const orig = btn.innerHTML;
-                btn.innerHTML = '<i class="fa fa-spinner fa-spin fa-fw"></i>Opening MPV...';
+                btn.innerHTML = `<i class="fa fa-spinner fa-spin fa-fw"></i>Opening ${getPlayerLabel(activePlayer)}...`;
                 setTimeout(() => { btn.innerHTML = orig; }, 3000);
             });
 

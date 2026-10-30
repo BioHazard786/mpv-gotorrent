@@ -346,6 +346,9 @@ install_from_local() {
   cp -f "$lua_src" "${target_dir}/main.lua"
   cp -f "$local_bin" "${target_dir}/${bin_filename}"
   chmod +x "${target_dir}/${bin_filename}"
+  if [ "$OS" = "darwin" ]; then
+    xattr -d com.apple.quarantine "${target_dir}/${bin_filename}" 2>/dev/null || true
+  fi
   echo "$ver_stamp" > "${target_dir}/.version"
 
   register_scheme_handler "$OS"
@@ -400,6 +403,21 @@ print_usage_tips() {
   printf "%sIn-player Controls:%s\n" "${C_BOLD}" "${C_RESET}"
   printf "  Press %sp%s in mpv to toggle live swarm download/upload stats.\n" "${C_CYAN}" "${C_RESET}"
   printf "  Press %sCtrl+k%s in mpv to keep/save current video permanently.\n" "${C_CYAN}" "${C_RESET}"
+
+  local current_os
+  current_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  if [ "$current_os" = "darwin" ] || [ -d "/Applications/IINA.app" ]; then
+    printf "\n"
+    printf "%s🍏 Using IINA on macOS?%s\n" "${C_BOLD}" "${C_RESET}"
+    printf "  1. Open IINA Preferences (%sCmd + ,%s) > %sAdvanced%s\n" "${C_CYAN}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+    printf "  2. Check %sEnable advanced settings%s and %sUse config directory%s\n" "${C_CYAN}" "${C_RESET}" "${C_CYAN}" "${C_RESET}"
+    printf "  3. Keybindings: Map shortcuts in %s~/.config/mpv/input.conf%s:\n" "${C_CYAN}" "${C_RESET}"
+    printf "     %sp script-binding gotorrent-stats%s\n" "${C_GRAY}" "${C_RESET}"
+    printf "     %sCtrl+k script-binding gotorrent-keep%s\n" "${C_GRAY}" "${C_RESET}"
+    printf "\n"
+    printf "  %s✨ Native IINA Plugin:%s Download %smpv-gotorrent.iinaplgz%s from Releases\n" "${C_GREEN}" "${C_RESET}" "${C_BOLD}" "${C_RESET}"
+    printf "     for a built-in macOS sidebar, speed gauges, and preferences window!\n"
+  fi
 }
 
 # Main installer flow
@@ -632,6 +650,9 @@ main() {
   cp -f "$LUA_FILE" "${TARGET_DIR}/main.lua"
   cp -f "$EXTRACTED_BIN" "${TARGET_DIR}/${BIN_FILENAME}"
   chmod +x "${TARGET_DIR}/${BIN_FILENAME}"
+  if [ "$OS" = "darwin" ]; then
+    xattr -d com.apple.quarantine "${TARGET_DIR}/${BIN_FILENAME}" 2>/dev/null || true
+  fi
   echo "$LATEST_TAG" > "${TARGET_DIR}/.version"
 
   register_scheme_handler "$OS"

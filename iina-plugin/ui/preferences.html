@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mpv-gotorrent Preferences</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 16px;
+    }
+
+    .pref-section {
+      margin-bottom: 18px;
+    }
+
+    .pref-label {
+      font-weight: 600;
+      margin-bottom: 4px;
+      display: block;
+    }
+
+    .pref-help {
+      font-size: 11px;
+      color: #8e8e93;
+      margin-top: 3px;
+    }
+
+    input[type="text"], input[type="number"], select {
+      padding: 5px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(142, 142, 147, 0.3);
+      background: rgba(255, 255, 255, 0.08);
+      color: inherit;
+      font-size: 13px;
+      width: 100%;
+      max-width: 320px;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .highlight-box {
+      background: rgba(10, 132, 255, 0.08);
+      border: 1px solid rgba(10, 132, 255, 0.2);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 18px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="highlight-box">
+    <strong>⚡ Zero-Wear RAM Ring Buffer:</strong>
+    <p class="pref-help" style="color: inherit; margin-top: 4px;">
+      Streaming in RAM prevents SSD write wear on soldered Mac drives. High-bitrate 4K movies stream directly through unified memory without touching disk.
+    </p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Max RAM Buffer Limit (MB):</label>
+    <input type="number" data-pref-key="max_ram_mb" placeholder="0" min="0" step="256" />
+    <p class="pref-help">
+      Amount of RAM to reserve for in-memory streaming (e.g. 512, 1024, 2048 MB). Set to <strong>0</strong> to use standard disk cache.
+    </p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Local HTTP Stream Port:</label>
+    <input type="number" data-pref-key="port" placeholder="8989" min="1024" max="65535" />
+    <p class="pref-help">Preferred local HTTP port (default: 8989).</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Default Keep / Save Directory:</label>
+    <input type="text" data-pref-key="keep_dir" placeholder="~/Videos" />
+    <p class="pref-help">Target folder when pressing "Keep File" (leave blank for ~/Videos or ~/Downloads).</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Keep Scope:</label>
+    <select data-pref-key="keep_scope">
+      <option value="current">Current Playing Video Only</option>
+      <option value="all">Entire Multi-File Torrent</option>
+    </select>
+    <p class="pref-help">Whether "Keep File" downloads only the current video file or the full torrent package.</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Metadata Resolution Timeout (Seconds):</label>
+    <input type="number" data-pref-key="timeout" placeholder="60" min="10" max="300" />
+    <p class="pref-help">Maximum time to wait for initial swarm discovery before timing out (default: 60).</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="checkbox-row">
+      <input type="checkbox" data-type="bool" data-pref-key="auto_playlist" />
+      <span>Auto-ingest multi-file torrents as playlists</span>
+    </label>
+    <p class="pref-help">Automatically queues TV show episodes and anime series into IINA's playlist panel.</p>
+  </div>
+
+</body>
+</html>
+

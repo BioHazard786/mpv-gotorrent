@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         1337x - Stream in MPV (mpv-gotorrent)
+// @name         1337x - Stream in MPV / IINA (mpv-gotorrent)
 // @namespace    https://github.com/biohazard786/mpv-gotorrent
-// @version      1.0.3
-// @description  Adds a 1-click button to stream torrents directly in MPV using mpv-gotorrent
+// @version      1.1.0
+// @description  Adds a 1-click button to stream torrents directly in MPV or IINA using mpv-gotorrent
 // @author       BioHazard786
 // @match        https://1337x.to/*
 // @match        https://*.1337x.to/*
@@ -32,7 +32,27 @@
 (function () {
     'use strict';
 
+    function getPlayer() {
+        return (localStorage.getItem('gotorrent_player') || 'mpv').toLowerCase();
+    }
+
+    function formatStreamUrl(magnet, forcePlayer) {
+        const player = forcePlayer || getPlayer();
+        if (player === 'iina') {
+            return 'iina://weblink?url=' + encodeURIComponent(magnet);
+        }
+        return 'mpv://' + magnet;
+    }
+
+    function getPlayerLabel(player) {
+        return player === 'iina' ? 'IINA' : 'MPV';
+    }
+
     function addButtons() {
+        const defaultPlayer = getPlayer();
+        const altPlayer = defaultPlayer === 'iina' ? 'mpv' : 'iina';
+        const titleText = `Stream in ${getPlayerLabel(defaultPlayer)} (Hold Alt/⌥ for ${getPlayerLabel(altPlayer)})`;
+
         // 1. Torrent Details Page (/torrent/...)
         const detailMagnet = document.querySelector('a[href^="magnet:"]');
         if (detailMagnet && !document.querySelector('.mpv-detail-stream-btn')) {
@@ -40,18 +60,20 @@
             const btn = detailMagnet.cloneNode(false);
             btn.classList.add('mpv-detail-stream-btn');
             btn.removeAttribute('onclick');
-            btn.href = 'mpv://' + detailMagnet.href;
-            btn.title = 'Play in MPV (mpv-gotorrent)';
+            btn.href = formatStreamUrl(detailMagnet.href, defaultPlayer);
+            btn.title = titleText;
 
             const playIconSvg = '<span class="icon"><svg viewBox="0 0 24 24" width="16" height="16" fill="#ffffff" style="vertical-align: middle; display: inline-block; margin-top: -2px;"><polygon points="7,4 19,12 7,20"/></svg></span>';
 
             // Replicate the native <span class="icon"> box with a crisp white play icon
-            btn.innerHTML = playIconSvg + 'Play in MPV';
+            btn.innerHTML = playIconSvg + `Play in ${getPlayerLabel(defaultPlayer)}`;
 
-            btn.addEventListener('click', () => {
-                btn.innerHTML = playIconSvg + 'Opening MPV...';
+            btn.addEventListener('click', (e) => {
+                const activePlayer = e.altKey ? altPlayer : defaultPlayer;
+                btn.href = formatStreamUrl(detailMagnet.href, activePlayer);
+                btn.innerHTML = playIconSvg + `Opening ${getPlayerLabel(activePlayer)}...`;
                 setTimeout(() => {
-                    btn.innerHTML = playIconSvg + 'Play in MPV';
+                    btn.innerHTML = playIconSvg + `Play in ${getPlayerLabel(defaultPlayer)}`;
                 }, 3000);
             });
 
@@ -78,7 +100,7 @@
             const playBtn = document.createElement('a');
             playBtn.className = 'mpv-list-stream-btn';
             playBtn.href = 'javascript:void(0);';
-            playBtn.title = 'Play in MPV';
+            playBtn.title = titleText;
             // Use 1337x's official download green (#89ad19)
             playBtn.style.cssText = `
                 display: inline-block;
@@ -104,10 +126,12 @@
                 e.preventDefault();
                 e.stopPropagation();
 
+                const activePlayer = e.altKey ? altPlayer : defaultPlayer;
+
                 // If already fetched on this row, launch directly
                 if (playBtn.dataset.magnet) {
                     playBtn.innerHTML = '⏳';
-                    window.location.href = 'mpv://' + playBtn.dataset.magnet;
+                    window.location.href = formatStreamUrl(playBtn.dataset.magnet, activePlayer);
                     setTimeout(() => { playBtn.innerHTML = '▶'; }, 2000);
                     return;
                 }
@@ -126,8 +150,8 @@
                     if (magnet) {
                         playBtn.dataset.magnet = magnet;
                         playBtn.innerHTML = '✔';
-                        playBtn.title = 'Play in MPV';
-                        window.location.href = 'mpv://' + magnet;
+                        playBtn.title = `Play in ${getPlayerLabel(activePlayer)}`;
+                        window.location.href = formatStreamUrl(magnet, activePlayer);
                         setTimeout(() => { playBtn.innerHTML = '▶'; }, 1500);
                     } else {
                         throw new Error('Magnet not found');

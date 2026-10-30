@@ -31,6 +31,36 @@ curl -fsSL https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/ins
 
 _(or via `wget`: `wget -qO- https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/install.sh | bash`)_
 
+### 🍏 IINA Setup (macOS)
+
+IINA is built on top of `libmpv` and offers **native plugin support** as well as full mpv script compatibility!
+
+#### Option A: Native IINA Plugin (Recommended — 1-Click Install)
+
+1. Download **`mpv-gotorrent.iinaplgz`** from the **[Releases](https://github.com/biohazard786/mpv-gotorrent/releases)** page.
+2. Double-click the file (or drag & drop it directly into IINA) and click **Install**.
+3. *(Alternative)* In IINA 1.3.0+, go to **Settings (`⌘ ,`) → Plugins → "Install from GitHub…"**, enter `biohazard786/mpv-gotorrent`, and click **Install**.
+
+✨ **Native Plugin Highlights**:
+- Live **macOS Sidebar tab** showing real-time download/upload speed gauges, active peers, and RAM buffer status.
+- One-click **"💾 Keep File"** button in the sidebar.
+- Native Settings panel in IINA Preferences.
+
+#### Option B: Terminal / MPV Script Engine
+
+1. Run the macOS install command above:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/biohazard786/mpv-gotorrent/main/install.sh | bash
+   ```
+2. In IINA Preferences (`⌘ ,`) → **Advanced**, toggle **Enable advanced settings** and check **Use config directory**.
+3. Map keybindings in `~/.config/mpv/input.conf`:
+   ```ini
+   p script-binding gotorrent-stats
+   Ctrl+k script-binding gotorrent-keep
+   ```
+
+> **💡 Zero SSD Wear for Mac:** Apple Silicon Macs (M1–M4) have soldered, non-replaceable SSDs. Set `max_ram_mb=1024` (or `2048`) to stream high-bitrate 4K movies entirely in unified memory with **zero disk writes**!
+
 ### Windows (PowerShell)
 
 ```powershell

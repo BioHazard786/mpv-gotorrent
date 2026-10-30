@@ -179,7 +179,22 @@ local function locate_binary()
     local conf_path = mp.find_config_file("scripts/mpv-gotorrent/" .. bin_name)
     if conf_path then return conf_path end
 
-    -- 3. Fall back to system PATH
+    -- 3. Common macOS / IINA and Unix fallback paths
+    local home = os.getenv("HOME")
+    if home and home ~= "" then
+        local fallback_paths = {
+            utils.join_path(home, ".config/mpv/scripts/mpv-gotorrent/" .. bin_name),
+            utils.join_path(home, "Library/Application Support/mpv/scripts/mpv-gotorrent/" .. bin_name),
+        }
+        for _, p in ipairs(fallback_paths) do
+            local stat = utils.file_info(p)
+            if stat and stat.is_file then
+                return p
+            end
+        end
+    end
+
+    -- 4. Fall back to system PATH
     return bin_name
 end
 

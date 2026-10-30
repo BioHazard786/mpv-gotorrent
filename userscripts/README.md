@@ -1,6 +1,6 @@
 # Browser Userscripts (1-Click Streaming)
 
-Enhance your browsing experience on **Nyaa.si** and **1337x** by streaming torrents directly into **mpv** with a single click.
+Enhance your browsing experience on **Nyaa.si** and **1337x** by streaming torrents directly into **mpv** or **IINA** (macOS) with a single click.
 
 ---
 
@@ -8,8 +8,8 @@ Enhance your browsing experience on **Nyaa.si** and **1337x** by streaming torre
 
 | Script | Supported Sites | Features |
 | :--- | :--- | :--- |
-| **[Nyaa.si Stream in MPV](nyaa-stream.user.js)** | `nyaa.si` | Adds a ▶ play button to search/browse tables and a "Stream in MPV" button on torrent pages. |
-| **[1337x Stream in MPV](1337x-stream.user.js)** | `1337x.to`, `1337x.st`, `1337x.ws`, `1337x.eu`, `1337x.se`, etc. | Adds a direct ▶ play button to search/popular listings (instant fetch) and torrent detail pages. |
+| **[Nyaa.si Stream in MPV / IINA](nyaa-stream.user.js)** | `nyaa.si` | Adds a ▶ play button to search/browse tables and a "Stream in MPV/IINA" button on torrent pages. |
+| **[1337x Stream in MPV / IINA](1337x-stream.user.js)** | `1337x.to`, `1337x.st`, `1337x.ws`, `1337x.eu`, `1337x.se`, etc. | Adds a direct ▶ play button to search/popular listings (instant fetch) and torrent detail pages. |
 
 ---
 
@@ -27,17 +27,29 @@ Enhance your browsing experience on **Nyaa.si** and **1337x** by streaming torre
 
 ## ⚡ How It Works
 
-When you click the stream button, the userscript triggers the `mpv://` URL scheme:
+When you click the stream button, the userscript triggers the appropriate desktop URL scheme:
 
-```
-mpv://magnet:?xt=urn:btih:...
-```
+* **MPV (Default)**:
+  ```
+  mpv://magnet:?xt=urn:btih:...
+  ```
+* **IINA (macOS)**:
+  ```
+  iina://weblink?url=magnet%3A%3Fxt%3Durn%3Abtih%3A...
+  ```
 
-1. Your browser delegates the `mpv://` link to the OS.
-2. The OS launches `mpv`.
-3. `mpv-gotorrent` hooks into the stream, discovers peers, and begins playback immediately!
+### 🍏 Using IINA on macOS?
+
+* **Instant toggle (Alt / ⌥ Click)**: Hold <kbd>Alt</kbd> (or <kbd>Option ⌥</kbd> on Mac) while clicking any stream button to open in the alternate player on the fly (e.g. opens in IINA instead of MPV).
+* **Set IINA as Default**: Run this once in your browser console on Nyaa or 1337x:
+  ```javascript
+  localStorage.setItem('gotorrent_player', 'iina');
+  ```
+  *(To switch back to MPV: `localStorage.setItem('gotorrent_player', 'mpv');`)*
 
 ### URL Scheme Handler Setup
 
-* **Automatic**: Re-run `install.sh` (Linux/macOS) or `install.ps1` (Windows) — it automatically registers the `mpv://` protocol handler with your desktop environment.
+* **Linux / BSD**: Run `install.sh` — it automatically registers the `mpv://` protocol handler with your desktop environment (`xdg-mime`).
+* **Windows**: Run `install.ps1` — it automatically registers `mpv://` in Windows Registry.
+* **macOS (IINA)**: IINA automatically registers `iina://` during app installation. No setup required!
 * **Third-Party Tools**: If you already use **[mpv-handler](https://github.com/akiirui/mpv-handler)**, it is 100% compatible out of the box.

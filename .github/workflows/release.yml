@@ -81,9 +81,20 @@ jobs:
             fi
           done
 
+          # Package IINA Plugin (.iinaplgz)
+          echo "==> Packaging IINA macOS Plugin..."
+          mkdir -p dist/iina/mpv-gotorrent.iinaplugin/bin dist/iina/mpv-gotorrent.iinaplugin/ui
+          cp dist/darwin_arm64/mpv-gotorrent dist/iina/mpv-gotorrent.iinaplugin/bin/mpv-gotorrent-darwin-arm64
+          cp dist/darwin_amd64/mpv-gotorrent dist/iina/mpv-gotorrent.iinaplugin/bin/mpv-gotorrent-darwin-amd64
+          cp iina-plugin/Info.json dist/iina/mpv-gotorrent.iinaplugin/
+          cp iina-plugin/main.js dist/iina/mpv-gotorrent.iinaplugin/
+          cp iina-plugin/global.js dist/iina/mpv-gotorrent.iinaplugin/
+          cp -r iina-plugin/ui/* dist/iina/mpv-gotorrent.iinaplugin/ui/
+          (cd dist/iina && zip -rq ../mpv-gotorrent.iinaplgz mpv-gotorrent.iinaplugin)
+
           # Generate SHA256 checksums
           cd dist
-          sha256sum mpv-gotorrent_*.tar.gz mpv-gotorrent_*.zip mpv-gotorrent-* > checksums.txt
+          sha256sum mpv-gotorrent_*.tar.gz mpv-gotorrent_*.zip mpv-gotorrent-* mpv-gotorrent.iinaplgz > checksums.txt
           echo "Generated Checksums:"
           cat checksums.txt
 
@@ -96,6 +107,7 @@ jobs:
             dist/mpv-gotorrent_*.tar.gz \
             dist/mpv-gotorrent_*.zip \
             dist/mpv-gotorrent-* \
+            dist/mpv-gotorrent.iinaplgz \
             dist/checksums.txt \
             --title "mpv-gotorrent $VERSION" \
             --generate-notes

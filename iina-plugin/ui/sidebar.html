@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Torrent Stats</title>
+  <style>
+    :root {
+      --bg: #1c1c1e;
+      --card-bg: rgba(255, 255, 255, 0.06);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text-main: #f2f2f7;
+      --text-muted: #8e8e93;
+      --accent-blue: #0a84ff;
+      --accent-green: #30d158;
+      --accent-cyan: #64d2ff;
+      --accent-orange: #ff9f0a;
+      --radius: 10px;
+    }
+
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f2f2f7;
+        --card-bg: #ffffff;
+        --card-border: rgba(0, 0, 0, 0.06);
+        --text-main: #1c1c1e;
+        --text-muted: #6c6c70;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text-main);
+      padding: 14px;
+      font-size: 13px;
+      line-height: 1.4;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-bottom: 12px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+    }
+
+    .header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .badge {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 12px;
+      letter-spacing: 0.5px;
+    }
+    .badge-streaming { background: rgba(48, 209, 88, 0.2); color: var(--accent-green); }
+    .badge-connecting { background: rgba(255, 159, 10, 0.2); color: var(--accent-orange); }
+    .badge-idle { background: rgba(142, 142, 147, 0.2); color: var(--text-muted); }
+
+    .torrent-title {
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.3;
+      margin-bottom: 4px;
+      word-break: break-word;
+    }
+
+    .speed-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 10px 0;
+    }
+
+    .speed-box {
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 8px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .speed-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .speed-val {
+      font-size: 15px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .speed-down { color: var(--accent-cyan); }
+    .speed-up { color: var(--accent-green); }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 8px 0 6px 0;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+      border-radius: 4px;
+      transition: width 0.3s ease;
+    }
+
+    .stats-row {
+      display: flex;
+      justify-content: space-between;
+      color: var(--text-muted);
+      font-size: 11px;
+      margin-top: 4px;
+    }
+
+    .storage-pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(100, 210, 255, 0.12);
+      color: var(--accent-cyan);
+      margin-top: 8px;
+    }
+
+    .btn {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      background: var(--accent-blue);
+      color: #ffffff;
+      border: none;
+      padding: 9px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s ease, transform 0.05s ease;
+      margin-top: 10px;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+
+    .empty-state {
+      text-align: center;
+      padding: 30px 10px;
+      color: var(--text-muted);
+    }
+    .empty-icon { font-size: 32px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+
+  <div id="active-card" class="card" style="display: none;">
+    <div class="header-row">
+      <span id="status-badge" class="badge badge-streaming">Streaming</span>
+      <span id="peers-count" style="font-size: 11px; color: var(--text-muted);">0 peers</span>
+    </div>
+
+    <div id="torrent-name" class="torrent-title">Streaming Torrent</div>
+
+    <div class="speed-grid">
+      <div class="speed-box">
+        <span class="speed-label">Download</span>
+        <span id="speed-down" class="speed-val speed-down">0.0 MB/s</span>
+      </div>
+      <div class="speed-box">
+        <span class="speed-label">Upload</span>
+        <span id="speed-up" class="speed-val speed-up">0.0 KB/s</span>
+      </div>
+    </div>
+
+    <div class="progress-bar-container">
+      <div id="progress-fill" class="progress-bar-fill"></div>
+    </div>
+
+    <div class="stats-row">
+      <span id="progress-pct">0%</span>
+      <span id="bytes-ratio">0 MB / 0 MB</span>
+    </div>
+
+    <div id="storage-indicator" class="storage-pill">
+      <span>⚡</span>
+      <span id="storage-text">RAM Ring Buffer (Zero SSD Wear)</span>
+    </div>
+
+    <button id="btn-keep" class="btn">
+      <span>💾</span>
+      <span id="btn-keep-text">Keep File to ~/Videos</span>
+    </button>
+  </div>
+
+  <div id="empty-card" class="card empty-state">
+    <div class="empty-icon">🎬</div>
+    <div style="font-weight: 600; margin-bottom: 4px;">Ready to Stream</div>
+    <div style="font-size: 12px; line-height: 1.4;">
+      Drag any <code>.torrent</code> file into IINA, open a magnet link, or stream with 1-click from your browser.
+    </div>
+  </div>
+
+  <script>
+    function formatBytes(bytes) {
+      if (!bytes || bytes <= 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0;
+      let val = bytes;
+      while (val >= 1024 && i < units.length - 1) {
+        val /= 1024;
+        i++;
+      }
+      return `${val.toFixed(1)} ${units[i]}`;
+    }
+
+    function formatSpeed(bytesPerSec) {
+      return `${formatBytes(bytesPerSec)}/s`;
+    }
+
+    const activeCard = document.getElementById("active-card");
+    const emptyCard = document.getElementById("empty-card");
+    const statusBadge = document.getElementById("status-badge");
+    const torrentName = document.getElementById("torrent-name");
+    const peersCount = document.getElementById("peers-count");
+    const speedDown = document.getElementById("speed-down");
+    const speedUp = document.getElementById("speed-up");
+    const progressFill = document.getElementById("progress-fill");
+    const progressPct = document.getElementById("progress-pct");
+    const bytesRatio = document.getElementById("bytes-ratio");
+    const storageText = document.getElementById("storage-text");
+    const btnKeep = document.getElementById("btn-keep");
+    const btnKeepText = document.getElementById("btn-keep-text");
+
+    btnKeep.addEventListener("click", () => {
+      btnKeep.disabled = true;
+      btnKeepText.innerText = "Requesting Keep…";
+      iina.postMessage("keep", {});
+    });
+
+    iina.onMessage("stats", (stats) => {
+      if (!stats || !stats.name) {
+        activeCard.style.display = "none";
+        emptyCard.style.display = "block";
+        return;
+      }
+
+      emptyCard.style.display = "none";
+      activeCard.style.display = "block";
+
+      torrentName.innerText = stats.name || "Torrent Stream";
+      peersCount.innerText = `${stats.peers || 0} peers (${stats.active_peers || 0} active)`;
+      speedDown.innerText = formatSpeed(stats.download_speed || 0);
+      speedUp.innerText = formatSpeed(stats.upload_speed || 0);
+
+      const pct = (stats.progress || 0).toFixed(1);
+      progressPct.innerText = `${pct}%`;
+      progressFill.style.width = `${pct}%`;
+
+      const doneStr = formatBytes(stats.completed_bytes || 0);
+      const totalStr = formatBytes(stats.total_bytes || 0);
+      bytesRatio.innerText = `${doneStr} / ${totalStr}`;
+
+      if (stats.storage_mode === "ram") {
+        const usedRam = formatBytes(stats.ram_used_bytes || 0);
+        const maxRam = formatBytes(stats.ram_max_bytes || 0);
+        storageText.innerText = `RAM Ring Buffer: ${usedRam} / ${maxRam} (Zero SSD Wear)`;
+      } else {
+        storageText.innerText = "Storage: Disk Cache";
+      }
+
+      if (stats.keep_active) {
+        btnKeep.disabled = true;
+        btnKeepText.innerText = `💾 Saving to disk… (${(stats.keep_progress || 0).toFixed(1)}%)`;
+      } else {
+        btnKeep.disabled = false;
+        btnKeepText.innerText = "Keep File to ~/Videos";
+      }
+    });
+
+    // Request immediate stats on tab focus
+    iina.postMessage("poll", {});
+  </script>
+</body>
+</html>
+
