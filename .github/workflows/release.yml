@@ -90,7 +90,8 @@ jobs:
           cp iina-plugin/main.js dist/iina/mpv-gotorrent.iinaplugin/
           cp iina-plugin/global.js dist/iina/mpv-gotorrent.iinaplugin/
           cp -r iina-plugin/ui/* dist/iina/mpv-gotorrent.iinaplugin/ui/
-          (cd dist/iina && zip -rq ../mpv-gotorrent.iinaplgz mpv-gotorrent.iinaplugin)
+          # Info.json must sit at the archive root for IINA to accept the package
+          (cd dist/iina/mpv-gotorrent.iinaplugin && zip -rq ../../mpv-gotorrent.iinaplgz .)
 
           # Generate SHA256 checksums
           cd dist

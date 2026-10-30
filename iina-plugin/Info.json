@@ -12,6 +12,8 @@
   "entry": "main.js",
   "globalEntry": "global.js",
   "permissions": [
+    "show-osd",
+    "show-alert",
     "file-system",
     "network-request"
   ],
@@ -19,9 +21,7 @@
     "127.0.0.1",
     "localhost",
     "github.com",
-    "api.github.com",
-    "objects.githubusercontent.com",
-    "*"
+    "objects.githubusercontent.com"
   ],
   "preferencesPage": "ui/preferences.html",
   "preferenceDefaults": {

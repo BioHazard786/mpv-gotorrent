@@ -39,7 +39,7 @@ iina-plugin:
 	cp -f iina-plugin/global.js dist/iina/mpv-gotorrent.iinaplugin/
 	cp -rf iina-plugin/ui/* dist/iina/mpv-gotorrent.iinaplugin/ui/
 	@echo "==> Packaging dist/mpv-gotorrent.iinaplgz..."
-	(cd dist/iina && zip -rq ../mpv-gotorrent.iinaplgz mpv-gotorrent.iinaplugin)
+	(cd dist/iina/mpv-gotorrent.iinaplugin && zip -rqFS ../../mpv-gotorrent.iinaplgz .)
 	@echo "Built dist/mpv-gotorrent.iinaplgz successfully!"
 
 install: build
