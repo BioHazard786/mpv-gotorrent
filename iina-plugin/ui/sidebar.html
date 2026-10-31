@@ -5,70 +5,87 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Torrent Stats</title>
   <style>
+    /* IINA makes the web view transparent, so the sidebar's own material (Liquid Glass or
+       visual effect) shows through. Never paint an opaque page background here. */
     :root {
-      --bg: #1c1c1e;
-      --card-bg: rgba(255, 255, 255, 0.06);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --text-main: #f2f2f7;
-      --text-muted: #8e8e93;
-      --accent-blue: #0a84ff;
-      --accent-green: #30d158;
-      --accent-cyan: #64d2ff;
-      --accent-orange: #ff9f0a;
-      --radius: 10px;
+      color-scheme: light dark;
+      --text-main: rgba(0, 0, 0, 0.88);
+      --text-muted: rgba(60, 60, 67, 0.62);
+      --glass-fill: rgba(255, 255, 255, 0.42);
+      --glass-border: rgba(255, 255, 255, 0.65);
+      --glass-edge: rgba(0, 0, 0, 0.06);
+      --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 6px 18px rgba(0, 0, 0, 0.06);
+      --well: rgba(120, 120, 128, 0.14);
+      --accent-blue: #007aff;
+      --accent-green: #1fb34a;
+      --accent-cyan: #0a8fc9;
+      --accent-orange: #e08600;
+      --radius: 16px;
+      --radius-inner: 11px;
     }
 
-    @media (prefers-color-scheme: light) {
+    @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #f2f2f7;
-        --card-bg: #ffffff;
-        --card-border: rgba(0, 0, 0, 0.06);
-        --text-main: #1c1c1e;
-        --text-muted: #6c6c70;
+        --text-main: rgba(255, 255, 255, 0.92);
+        --text-muted: rgba(235, 235, 245, 0.6);
+        --glass-fill: rgba(255, 255, 255, 0.07);
+        --glass-border: rgba(255, 255, 255, 0.16);
+        --glass-edge: rgba(0, 0, 0, 0.25);
+        --glass-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.18);
+        --well: rgba(255, 255, 255, 0.09);
+        --accent-blue: #0a84ff;
+        --accent-green: #30d158;
+        --accent-cyan: #64d2ff;
+        --accent-orange: #ff9f0a;
       }
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    html, body { background: transparent; }
+
     body {
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-      background: var(--bg);
       color: var(--text-main);
-      padding: 14px;
+      padding: 12px;
       font-size: 13px;
       line-height: 1.4;
       user-select: none;
       -webkit-user-select: none;
+      -webkit-font-smoothing: antialiased;
     }
 
     .card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
+      position: relative;
+      background: var(--glass-fill);
       border-radius: var(--radius);
-      padding: 12px;
+      padding: 14px;
       margin-bottom: 12px;
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
+      /* top-lit hairline + soft outer edge gives the glass rim without needing a blur */
+      box-shadow:
+        inset 0 1px 0 var(--glass-border),
+        inset 0 0 0 1px var(--glass-edge),
+        var(--glass-shadow);
     }
 
     .header-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
 
     .badge {
       font-size: 10px;
       font-weight: 600;
       text-transform: uppercase;
-      padding: 2px 7px;
-      border-radius: 12px;
+      padding: 3px 9px;
+      border-radius: 999px;
       letter-spacing: 0.5px;
     }
-    .badge-streaming { background: rgba(48, 209, 88, 0.2); color: var(--accent-green); }
-    .badge-connecting { background: rgba(255, 159, 10, 0.2); color: var(--accent-orange); }
-    .badge-idle { background: rgba(142, 142, 147, 0.2); color: var(--text-muted); }
+    .badge-streaming { background: color-mix(in srgb, var(--accent-green) 20%, transparent); color: var(--accent-green); }
+    .badge-connecting { background: color-mix(in srgb, var(--accent-orange) 20%, transparent); color: var(--accent-orange); }
+    .badge-idle { background: var(--well); color: var(--text-muted); }
 
     .torrent-title {
       font-size: 13px;
@@ -82,13 +99,13 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin: 10px 0;
+      margin: 12px 0;
     }
 
     .speed-box {
-      background: rgba(0, 0, 0, 0.15);
-      border-radius: 8px;
-      padding: 8px 10px;
+      background: var(--well);
+      border-radius: var(--radius-inner);
+      padding: 9px 11px;
       display: flex;
       flex-direction: column;
     }
@@ -110,8 +127,8 @@
     .progress-bar-container {
       width: 100%;
       height: 6px;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 4px;
+      background: var(--well);
+      border-radius: 999px;
       overflow: hidden;
       margin: 8px 0 6px 0;
     }
@@ -120,7 +137,7 @@
       height: 100%;
       width: 0%;
       background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
-      border-radius: 4px;
+      border-radius: 999px;
       transition: width 0.3s ease;
     }
 
@@ -130,6 +147,7 @@
       color: var(--text-muted);
       font-size: 11px;
       margin-top: 4px;
+      font-variant-numeric: tabular-nums;
     }
 
     .storage-pill {
@@ -138,12 +156,14 @@
       gap: 6px;
       font-size: 11px;
       font-weight: 500;
-      padding: 4px 8px;
-      border-radius: 6px;
-      background: rgba(100, 210, 255, 0.12);
+      padding: 6px 10px;
+      border-radius: var(--radius-inner);
+      background: color-mix(in srgb, var(--accent-cyan) 14%, transparent);
       color: var(--accent-cyan);
-      margin-top: 8px;
+      margin-top: 10px;
     }
+
+    .icon { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
     .btn {
       width: 100%;
@@ -155,23 +175,31 @@
       color: #ffffff;
       border: none;
       padding: 9px 12px;
-      border-radius: 8px;
+      border-radius: 999px;
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
-      transition: opacity 0.15s ease, transform 0.05s ease;
-      margin-top: 10px;
+      margin-top: 12px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), 0 1px 3px rgba(0, 0, 0, 0.18);
+      transition: filter 0.15s ease, transform 0.05s ease;
     }
-    .btn:hover { opacity: 0.9; }
+    .btn:hover { filter: brightness(1.08); }
     .btn:active { transform: scale(0.98); }
-    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn:disabled { opacity: 0.5; cursor: default; filter: none; }
 
     .empty-state {
       text-align: center;
-      padding: 30px 10px;
+      padding: 32px 16px;
       color: var(--text-muted);
     }
-    .empty-icon { font-size: 32px; margin-bottom: 8px; }
+    .empty-icon { width: 34px; height: 34px; margin: 0 auto 10px; display: block; color: var(--text-muted); stroke-width: 1.5; }
+    .empty-state code {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 11px;
+      background: var(--well);
+      padding: 1px 5px;
+      border-radius: 5px;
+    }
   </style>
 </head>
 <body>
@@ -205,19 +233,19 @@
     </div>
 
     <div id="storage-indicator" class="storage-pill">
-      <span>⚡</span>
+      <svg class="icon" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
       <span id="storage-text">RAM Ring Buffer (Zero SSD Wear)</span>
     </div>
 
     <button id="btn-keep" class="btn">
-      <span>💾</span>
+      <svg class="icon" viewBox="0 0 24 24"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/></svg>
       <span id="btn-keep-text">Keep File to ~/Videos</span>
     </button>
   </div>
 
   <div id="empty-card" class="card empty-state">
-    <div class="empty-icon">🎬</div>
-    <div style="font-weight: 600; margin-bottom: 4px;">Ready to Stream</div>
+    <svg class="icon empty-icon" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m10 9.5 4.5 2.5-4.5 2.5z"/></svg>
+    <div style="font-weight: 600; margin-bottom: 4px; color: var(--text-main);">Ready to Stream</div>
     <div style="font-size: 12px; line-height: 1.4;">
       Drag any <code>.torrent</code> file into IINA, open a magnet link, or stream with 1-click from your browser.
     </div>
@@ -293,7 +321,7 @@
 
       if (stats.keep_active) {
         btnKeep.disabled = true;
-        btnKeepText.innerText = `💾 Saving to disk… (${(stats.keep_progress || 0).toFixed(1)}%)`;
+        btnKeepText.innerText = `Saving to disk… (${(stats.keep_progress || 0).toFixed(1)}%)`;
       } else {
         btnKeep.disabled = false;
         btnKeepText.innerText = "Keep File to ~/Videos";
