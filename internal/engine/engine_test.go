@@ -97,6 +97,22 @@ func TestKeepExportsFileFromMultiFileTorrent(t *testing.T) {
 	if status, _ := eng.KeepCurrent("current", keepDir, 0); status.Status != "completed" {
 		t.Errorf("expected completed status on repeat keep, got %q", status.Status)
 	}
+
+	// A second episode can be kept in the same session
+	if status, _ := eng.KeepCurrent("current", keepDir, 1); status.Status != "keeping" {
+		t.Fatalf("expected a second file to start keeping, got %+v", status)
+	}
+	select {
+	case <-eng.WaitKeepComplete():
+	case <-time.After(15 * time.Second):
+		t.Fatal("second keep never completed")
+	}
+	if !fileExists(filepath.Join(keepDir, "ep2.mkv")) {
+		t.Error("second kept file missing")
+	}
+	if !eng.IsKeepCompleted() {
+		t.Error("expected every keep to be completed")
+	}
 }
 
 func TestKeepRejectedInRAMMode(t *testing.T) {
@@ -161,5 +177,112 @@ func TestCleanStaleSessionDirsKeepsLiveSessions(t *testing.T) {
 	}
 	if _, err := os.Stat(live); err != nil {
 		t.Error("live session dir was removed")
+	}
+}
+
+// newWindowEngine starts a disk-mode engine with a 2-file cache window over a three-episode pack,
+// with every episode present in the session cache both as a finished and a .part file.
+func newWindowEngine(t *testing.T) (*Engine, func(name string) string) {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	content := filepath.Join(t.TempDir(), "Show")
+	if err := os.MkdirAll(content, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"ep1.mkv", "ep2.mkv", "ep3.mkv"} {
+		if err := os.WriteFile(filepath.Join(content, n), bytes.Repeat([]byte(n), 100<<10), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	eng, err := NewEngine(Config{MaxCachedFiles: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { eng.Close() })
+	if _, err := eng.AddSource(context.Background(), writeTorrentFor(t, content)); err != nil {
+		t.Fatal(err)
+	}
+
+	cached := func(n string) string { return filepath.Join(eng.DataDir(), "Show", n) }
+	for _, n := range []string{"ep1.mkv", "ep2.mkv", "ep3.mkv"} {
+		if err := os.MkdirAll(filepath.Dir(cached(n)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range []string{cached(n), cached(n) + ".part"} {
+			if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return eng, cached
+}
+
+// onDisk reports whether a cached file still exists. Marking a neighbour's shared piece incomplete
+// may rename it back to .part, so either name counts.
+func onDisk(cached func(string) string, n string) bool {
+	return fileExists(cached(n)) || fileExists(cached(n+".part"))
+}
+
+func TestNoteStreamedDeletesFilesOutsideWindow(t *testing.T) {
+	eng, cached := newWindowEngine(t)
+
+	for _, idx := range []int{0, 1, 0, 2} { // replaying ep1 refreshes it, so ep2 is oldest
+		eng.NoteStreamed(idx)
+	}
+	eng.freeing.Wait()
+
+	if onDisk(cached, "ep2.mkv") {
+		t.Error("oldest file was not deleted")
+	}
+	for _, n := range []string{"ep1.mkv", "ep3.mkv"} {
+		if !onDisk(cached, n) {
+			t.Errorf("%s inside the window was deleted", n)
+		}
+	}
+}
+
+func TestNoteStreamedSparesKeptFile(t *testing.T) {
+	eng, cached := newWindowEngine(t)
+	eng.keeps = append(eng.keeps, &keepJob{file: eng.Torrent().Files()[0], done: make(chan struct{})})
+
+	for _, idx := range []int{0, 1, 2} {
+		eng.NoteStreamed(idx)
+	}
+	eng.freeing.Wait()
+
+	if !onDisk(cached, "ep1.mkv") {
+		t.Error("kept file was deleted after leaving the window")
+	}
+}
+
+func TestSeedRatioPausesAndResumesUpload(t *testing.T) {
+	eng, _ := newWindowEngine(t)
+	eng.seedRatio = 1.5
+
+	paused := func() bool {
+		eng.mu.RLock()
+		defer eng.mu.RUnlock()
+		return eng.uploadPaused
+	}
+	eng.enforceSeedRatio(100, 149)
+	if paused() {
+		t.Fatal("paused below the ratio")
+	}
+	eng.enforceSeedRatio(100, 150)
+	if !paused() {
+		t.Fatal("not paused at the ratio")
+	}
+	eng.enforceSeedRatio(200, 150) // more downloaded raises the cap again
+	if paused() {
+		t.Fatal("still paused after dropping below the ratio")
+	}
+}
+
+func TestFreeDiskBytesReadsTempDir(t *testing.T) {
+	free, ok := freeDiskBytes(t.TempDir())
+	if ok && free == 0 {
+		t.Error("reported zero free bytes on a writable temp dir")
 	}
 }

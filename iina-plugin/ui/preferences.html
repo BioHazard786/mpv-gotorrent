@@ -72,6 +72,32 @@
   </div>
 
   <div class="pref-section">
+    <label class="pref-label">Episodes Kept on Disk:</label>
+    <input type="number" data-pref-key="max_cached_files" placeholder="3" min="0" max="50" />
+    <p class="pref-help">
+      Disk mode only: keep the last N played episodes on disk and delete older ones as you watch (default: 3). Set to <strong>0</strong> to keep everything until IINA closes. Kept files are never deleted.
+    </p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Upload Limit (KiB/s):</label>
+    <input type="number" data-pref-key="max_upload_kbps" placeholder="0" min="0" step="64" />
+    <p class="pref-help">Caps upload speed while streaming. <strong>0</strong> = unlimited.</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Download Limit (KiB/s):</label>
+    <input type="number" data-pref-key="max_download_kbps" placeholder="0" min="0" step="256" />
+    <p class="pref-help">Caps download speed. <strong>0</strong> = unlimited. Below the video's bitrate, playback will stall.</p>
+  </div>
+
+  <div class="pref-section">
+    <label class="pref-label">Seed Ratio Cap:</label>
+    <input type="number" data-pref-key="seed_ratio" placeholder="0" min="0" step="0.5" />
+    <p class="pref-help">Stop uploading once you have shared this multiple of what you downloaded (e.g. 1.0). <strong>0</strong> = no cap.</p>
+  </div>
+
+  <div class="pref-section">
     <label class="pref-label">Local HTTP Stream Port:</label>
     <input type="number" data-pref-key="port" placeholder="8989" min="1024" max="65535" />
     <p class="pref-help">Preferred local HTTP port (default: 8989).</p>

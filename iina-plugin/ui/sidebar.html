@@ -299,7 +299,8 @@
       activeCard.style.display = "block";
 
       torrentName.innerText = stats.name || "Torrent Stream";
-      peersCount.innerText = `${stats.peers || 0} peers (${stats.active_peers || 0} active)`;
+      peersCount.innerText = `${stats.peers || 0} peers (${stats.active_peers || 0} active, ${stats.seeders || 0} seeders)`
+        + (stats.upload_paused ? " · upload paused (seed ratio)" : "");
       speedDown.innerText = formatSpeed(stats.download_speed || 0);
       speedUp.innerText = formatSpeed(stats.upload_speed || 0);
 
@@ -319,9 +320,11 @@
         storageText.innerText = "Storage: Disk Cache";
       }
 
+      // Stays clickable while saving so another episode of a pack can be kept too
       if (stats.keep_active) {
-        btnKeep.disabled = true;
-        btnKeepText.innerText = `Saving to disk… (${(stats.keep_progress || 0).toFixed(1)}%)`;
+        btnKeep.disabled = false;
+        const what = stats.keep_count > 1 ? `${stats.keep_count} files` : "to disk";
+        btnKeepText.innerText = `Keep This File · saving ${what} (${(stats.keep_progress || 0).toFixed(1)}%)`;
       } else {
         btnKeep.disabled = false;
         btnKeepText.innerText = "Keep File to ~/Videos";

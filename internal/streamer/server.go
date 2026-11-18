@@ -264,6 +264,7 @@ func (s *Server) serveTorrentStream(w http.ResponseWriter, r *http.Request, file
 	}
 
 	s.engine.PrioritizeFile(fileIdx)
+	s.engine.NoteStreamed(fileIdx)
 
 	targetFile := files[fileIdx]
 	rangeHeader := r.Header.Get("Range")

@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -36,6 +38,17 @@ type Config struct {
 	MaxRAMMB  int
 	KeepDir   string
 	KeepScope string
+
+	// MaxCachedFiles caps how many streamed files stay on disk; older ones are deleted as new
+	// ones start (0 = keep everything until exit). Ignored in RAM mode and with KeepFiles.
+	MaxCachedFiles int
+
+	// MaxUploadKBps and MaxDownloadKBps cap transfer rates in KiB/s (0 = unlimited).
+	MaxUploadKBps   int
+	MaxDownloadKBps int
+
+	// SeedRatio caps uploading at this multiple of what was downloaded this session (0 = no cap).
+	SeedRatio float64
 }
 
 // Engine wraps anacrolix/torrent client and manages active torrent streams.
@@ -52,18 +65,18 @@ type Engine struct {
 	defaultKeepDir     string
 	defaultKeepScope   string
 
-	// Keep File state
-	keepMu        sync.RWMutex
-	keepActive    bool
-	keepPath      string
-	keepName      string
-	keepScope     string
-	keepFile      *torrent.File
-	keepCompleted bool
-	keepDoneChan  chan struct{}
+	// Keep File state: one job per Ctrl+K, so several episodes of a pack can be saved
+	keepMu sync.RWMutex
+	keeps  []*keepJob
 
 	prioritizedMu sync.Mutex
 	prioritized   map[int]bool
+
+	maxCachedFiles int
+	seedRatio      float64
+	uploadPaused   bool           // guarded by mu
+	streamed       []int          // streamed file indexes, most recent first
+	freeing        sync.WaitGroup // background deletions of files that left the window
 
 	mediaMu      sync.Mutex
 	fileBitrates map[int]int64 // bytes per second, derived from durations mpv reports
@@ -93,12 +106,15 @@ type Stats struct {
 	ActivePeers    int     `json:"active_peers"`
 	PieceCount     int     `json:"piece_count"`
 	PiecesDone     int     `json:"pieces_done"`
-	StorageMode    string  `json:"storage_mode"` // "ram" or "disk"
+	Seeders        int     `json:"seeders"`
+	UploadPaused   bool    `json:"upload_paused,omitempty"` // seed ratio reached
+	StorageMode    string  `json:"storage_mode"`            // "ram" or "disk"
 	RAMUsedBytes   int64   `json:"ram_used_bytes,omitempty"`
 	RAMMaxBytes    int64   `json:"ram_max_bytes,omitempty"`
 	KeepActive     bool    `json:"keep_active"`
-	KeepPath       string  `json:"keep_path,omitempty"`
+	KeepPath       string  `json:"keep_path,omitempty"` // destination of the latest keep
 	KeepProgress   float64 `json:"keep_progress,omitempty"`
+	KeepCount      int     `json:"keep_count,omitempty"`
 }
 
 // NewEngine initializes the BitTorrent client with optimized streaming defaults.
@@ -146,6 +162,14 @@ func NewEngine(cfg Config) (*Engine, error) {
 	clientConfig.DisableTCP = false
 	clientConfig.DisableUTP = false
 
+	// Bursts are left at 0 so anacrolix sizes them to its request size
+	if cfg.MaxUploadKBps > 0 {
+		clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(cfg.MaxUploadKBps*1024), 0)
+	}
+	if cfg.MaxDownloadKBps > 0 {
+		clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(cfg.MaxDownloadKBps*1024), 0)
+	}
+
 	var ramStorage *RAMStorageClient
 	if cfg.MaxRAMMB > 0 {
 		maxBytes := int64(cfg.MaxRAMMB) * 1024 * 1024
@@ -175,6 +199,12 @@ func NewEngine(cfg Config) (*Engine, error) {
 	// Periodically sync DHT nodes (every 2 minutes)
 	dm.StartPeriodicSync(2 * time.Minute)
 
+	// A window of 1 would delete the playing file when mpv opens the next one early
+	// (--prefetch-playlist), so 2 is the smallest that is safe.
+	if cfg.MaxCachedFiles == 1 {
+		cfg.MaxCachedFiles = 2
+	}
+
 	eng := &Engine{
 		client:             client,
 		dataDir:            cfg.DataDir,
@@ -186,7 +216,8 @@ func NewEngine(cfg Config) (*Engine, error) {
 		maxRAMMB:           cfg.MaxRAMMB,
 		defaultKeepDir:     cfg.KeepDir,
 		defaultKeepScope:   cfg.KeepScope,
-		keepDoneChan:       make(chan struct{}),
+		maxCachedFiles:     cfg.MaxCachedFiles,
+		seedRatio:          cfg.SeedRatio,
 		prioritized:        make(map[int]bool),
 		fileBitrates:       make(map[int]int64),
 		done:               make(chan struct{}),
@@ -372,6 +403,90 @@ func (e *Engine) PrioritizeFile(fileIdx int) {
 	)
 }
 
+// NoteStreamed records that fileIdx is being played and, in disk mode, deletes the cached data of
+// files that fell out of the MaxCachedFiles window so a long pack doesn't fill the disk.
+func (e *Engine) NoteStreamed(fileIdx int) {
+	if e.maxCachedFiles <= 0 || e.ramStorage != nil || e.keepFiles {
+		return
+	}
+
+	e.prioritizedMu.Lock()
+	if len(e.streamed) > 0 && e.streamed[0] == fileIdx {
+		e.prioritizedMu.Unlock()
+		return
+	}
+	order := []int{fileIdx}
+	for _, i := range e.streamed {
+		if i != fileIdx {
+			order = append(order, i)
+		}
+	}
+	var stale []int
+	if len(order) > e.maxCachedFiles {
+		stale = order[e.maxCachedFiles:]
+		order = order[:e.maxCachedFiles]
+	}
+	e.streamed = order
+	for _, i := range stale {
+		delete(e.prioritized, i) // so replaying it re-prioritizes its headers
+	}
+	e.prioritizedMu.Unlock()
+
+	if len(stale) == 0 {
+		return
+	}
+	t := e.Torrent()
+	if t == nil || t.Info() == nil {
+		return
+	}
+	kept := map[*torrent.File]bool{}
+	e.keepMu.RLock()
+	for _, j := range e.keeps {
+		if j.file == nil {
+			e.keepMu.RUnlock()
+			return // the whole pack is being saved
+		}
+		kept[j.file] = true
+	}
+	e.keepMu.RUnlock()
+
+	// Marking pieces incomplete is one database write each (seconds for a large episode), so it
+	// runs in the background instead of delaying the new episode's first response.
+	e.freeing.Add(1)
+	go func() {
+		defer e.freeing.Done()
+		for _, i := range stale {
+			if f := t.Files()[i]; !kept[f] {
+				e.freeFile(t, f)
+			}
+		}
+	}()
+}
+
+// freeFile drops a file's pieces and deletes its data from the session cache.
+func (e *Engine) freeFile(t *torrent.Torrent, f *torrent.File) {
+	for p := f.BeginPieceIndex(); p < f.EndPieceIndex(); p++ {
+		select {
+		case <-e.done:
+			return // engine closing; the whole cache dir is purged anyway
+		default:
+		}
+		piece := t.Piece(p)
+		piece.SetPriority(torrent.PiecePriorityNone)
+		// Pieces shared with a neighbouring file are re-fetched if that file is replayed
+		_ = piece.Storage().MarkNotComplete()
+		piece.UpdateCompletion()
+	}
+	// Incomplete files are stored as <name>.part until their last piece lands
+	path := e.cachedFilePath(t, f)
+	for _, p := range []string{path, path + ".part"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			slog.Debug("failed to delete old cached file", "file", p, "err", err)
+		}
+	}
+	slog.Info("freed cached file", "file", f.DisplayPath())
+}
+
 // Torrent returns the active torrent.
 func (e *Engine) Torrent() *torrent.Torrent {
 	e.mu.RLock()
@@ -401,6 +516,7 @@ func (e *Engine) Stats() Stats {
 	t := e.torrent
 	downloadSpeed := e.downloadSpeed
 	uploadSpeed := e.uploadSpeed
+	uploadPaused := e.uploadPaused
 	e.mu.RUnlock()
 
 	if t == nil || t.Info() == nil {
@@ -435,20 +551,17 @@ func (e *Engine) Stats() Stats {
 		ramMax = int64(e.maxRAMMB) * 1024 * 1024
 	}
 
+	var keepPath string
+	var keepDone, keepTotal int64
 	e.keepMu.RLock()
-	keepActive := e.keepActive
-	keepPath := e.keepPath
-	keepCompleted := e.keepCompleted
-	keepFile := e.keepFile
-	keepScope := e.keepScope
-	e.keepMu.RUnlock()
-
-	keepProgress := 0.0
-	if keepCompleted {
-		keepProgress = 100.0
-	} else if keepActive {
-		keepProgress = percent(keepBytes(t, keepFile, keepScope))
+	keepCount := len(e.keeps)
+	for _, j := range e.keeps {
+		done, total := keepBytes(t, j.file)
+		keepDone += done
+		keepTotal += total
+		keepPath = j.path
 	}
+	e.keepMu.RUnlock()
 
 	return Stats{
 		Name:           t.Name(),
@@ -460,14 +573,17 @@ func (e *Engine) Stats() Stats {
 		Progress:       percent(completedBytes, totalBytes),
 		Peers:          len(t.PeerConns()),
 		ActivePeers:    activePeers,
+		Seeders:        t.Stats().ConnectedSeeders,
+		UploadPaused:   uploadPaused,
 		PieceCount:     t.NumPieces(),
 		PiecesDone:     piecesDone,
 		StorageMode:    storageMode,
 		RAMUsedBytes:   ramUsed,
 		RAMMaxBytes:    ramMax,
-		KeepActive:     keepActive,
+		KeepActive:     keepCount > 0,
 		KeepPath:       keepPath,
-		KeepProgress:   keepProgress,
+		KeepProgress:   percent(keepDone, keepTotal),
+		KeepCount:      keepCount,
 	}
 }
 
@@ -503,7 +619,69 @@ func (e *Engine) speedMonitor() {
 		e.lastWriteBytes = currentWrite
 		e.lastCheckTime = now
 		e.mu.Unlock()
+
+		e.enforceSeedRatio(currentRead, currentWrite)
 	}
+}
+
+// enforceSeedRatio pauses uploading while this session has uploaded at least seedRatio times what
+// it downloaded, and resumes it as more is downloaded, so upload stays capped at that multiple.
+func (e *Engine) enforceSeedRatio(downloaded, uploaded int64) {
+	t := e.Torrent()
+	if e.seedRatio <= 0 || t == nil {
+		return
+	}
+	over := float64(uploaded) >= e.seedRatio*float64(downloaded)
+
+	e.mu.Lock()
+	changed := over != e.uploadPaused
+	e.uploadPaused = over
+	e.mu.Unlock()
+	if !changed {
+		return
+	}
+	if over {
+		t.DisallowDataUpload()
+		slog.Info("seed ratio reached, pausing upload", "ratio", e.seedRatio, "uploaded", uploaded, "downloaded", downloaded)
+	} else {
+		t.AllowDataUpload()
+		slog.Debug("below seed ratio, resuming upload")
+	}
+}
+
+// SwarmCounts reports connected peers and seeders. It also works while metadata is still being
+// fetched, before Torrent() is set, so the player can show whether a swarm exists at all.
+func (e *Engine) SwarmCounts() (peers, seeders int) {
+	for _, t := range e.client.Torrents() {
+		st := t.Stats()
+		peers += st.ActivePeers
+		seeders += st.ConnectedSeeders
+	}
+	return peers, seeders
+}
+
+// DiskSpaceWarning explains when the cache drive can't hold the largest file still to download,
+// so the user can switch to RAM mode before playback stalls on a full disk. Empty when there is
+// room, in RAM mode, or when free space can't be read on this platform.
+func (e *Engine) DiskSpaceWarning() string {
+	t := e.Torrent()
+	if e.ramStorage != nil || t == nil || t.Info() == nil {
+		return ""
+	}
+	var need int64
+	for _, f := range t.Files() {
+		need = max(need, f.Length()-f.BytesCompleted())
+	}
+	free, ok := freeDiskBytes(e.dataDir)
+	if !ok || free >= uint64(need) {
+		return ""
+	}
+	return fmt.Sprintf("Low disk space: %s free, but the largest file needs %s. Set max_ram_mb to stream from RAM.",
+		formatGB(int64(free)), formatGB(need))
+}
+
+func formatGB(n int64) string {
+	return fmt.Sprintf("%.1f GB", float64(n)/(1<<30))
 }
 
 // heartbeat keeps the session dir's heartbeat fresh so cleanStaleSessionDirs leaves it alone.
@@ -533,42 +711,84 @@ type KeepStatus struct {
 	Message        string  `json:"message,omitempty"`
 }
 
+// keepJob is one keep request: a single file, or the whole torrent when file is nil.
+type keepJob struct {
+	file      *torrent.File
+	name      string
+	path      string
+	completed bool          // guarded by keepMu
+	done      chan struct{} // closed once the export finishes
+}
+
 func (e *Engine) IsKeepActive() bool {
 	e.keepMu.RLock()
 	defer e.keepMu.RUnlock()
-	return e.keepActive
+	return len(e.keeps) > 0
 }
 
+// IsKeepCompleted reports whether every keep has finished exporting.
 func (e *Engine) IsKeepCompleted() bool {
 	e.keepMu.RLock()
 	defer e.keepMu.RUnlock()
-	return e.keepCompleted
+	for _, j := range e.keeps {
+		if !j.completed {
+			return false
+		}
+	}
+	return true
 }
 
-func (e *Engine) KeepPath() string {
-	e.keepMu.RLock()
-	defer e.keepMu.RUnlock()
-	return e.keepPath
-}
-
+// KeepName lists the keeps still downloading, for the background-download notification.
 func (e *Engine) KeepName() string {
 	e.keepMu.RLock()
 	defer e.keepMu.RUnlock()
-	return e.keepName
+	var names []string
+	for _, j := range e.keeps {
+		if !j.completed {
+			names = append(names, j.name)
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
+// WaitKeepComplete returns a channel closed once every keep requested so far has finished.
 func (e *Engine) WaitKeepComplete() <-chan struct{} {
 	e.keepMu.RLock()
-	defer e.keepMu.RUnlock()
-	return e.keepDoneChan
+	jobs := slices.Clone(e.keeps)
+	e.keepMu.RUnlock()
+	ch := make(chan struct{})
+	go func() {
+		for _, j := range jobs {
+			<-j.done
+		}
+		close(ch)
+	}()
+	return ch
 }
 
-// keepBytes reports completed and total bytes of what is being kept.
-func keepBytes(t *torrent.Torrent, f *torrent.File, scope string) (done, total int64) {
-	if scope == "all" || f == nil {
+// keepBytes reports completed and total bytes of a kept file, or of the whole torrent for nil.
+func keepBytes(t *torrent.Torrent, f *torrent.File) (done, total int64) {
+	if f == nil {
 		return t.BytesCompleted(), t.Length()
 	}
 	return f.BytesCompleted(), f.Length()
+}
+
+func (j *keepJob) status(t *torrent.Torrent, status string) KeepStatus {
+	scope := "current"
+	if j.file == nil {
+		scope = "all"
+	}
+	done, total := keepBytes(t, j.file)
+	return KeepStatus{
+		Status:         status,
+		Name:           j.name,
+		DestPath:       j.path,
+		Progress:       percent(done, total),
+		TotalBytes:     total,
+		CompletedBytes: done,
+		Scope:          scope,
+	}
 }
 
 func percent(done, total int64) float64 {
@@ -590,30 +810,43 @@ func (e *Engine) KeepCurrent(scope, targetDir string, fileIdx int) (KeepStatus, 
 		return KeepStatus{Status: "error", Message: "Keep needs disk mode (set max_ram_mb=0)"}, errors.New("keep is not supported in RAM mode")
 	}
 
-	e.keepMu.Lock()
-	defer e.keepMu.Unlock()
-
-	if e.keepActive {
-		status := "already_keeping"
-		if e.keepCompleted {
-			status = "completed"
-		}
-		done, total := keepBytes(t, e.keepFile, e.keepScope)
-		return KeepStatus{
-			Status:         status,
-			Name:           e.keepName,
-			DestPath:       e.keepPath,
-			Progress:       percent(done, total),
-			TotalBytes:     total,
-			CompletedBytes: done,
-			Scope:          e.keepScope,
-		}, nil
-	}
-
 	if scope == "" {
 		scope = e.defaultKeepScope
 		if scope == "" {
 			scope = "current"
+		}
+	}
+
+	files := t.Files()
+	var targetFile *torrent.File // stays nil for scope "all"
+	if scope != "all" {
+		if fileIdx >= 0 && fileIdx < len(files) {
+			targetFile = files[fileIdx]
+		} else {
+			var maxLen int64 = -1
+			for _, f := range files {
+				if f.Length() > maxLen {
+					maxLen = f.Length()
+					targetFile = f
+				}
+			}
+		}
+		if targetFile == nil {
+			return KeepStatus{Status: "error", Message: "no files in torrent"}, errors.New("no files in torrent")
+		}
+	}
+
+	e.keepMu.Lock()
+	defer e.keepMu.Unlock()
+
+	// Already covered by an earlier keep of this file or of the whole torrent
+	for _, j := range e.keeps {
+		if j.file == nil || j.file == targetFile {
+			status := "already_keeping"
+			if j.completed {
+				status = "completed"
+			}
+			return j.status(t, status), nil
 		}
 	}
 
@@ -639,65 +872,28 @@ func (e *Engine) KeepCurrent(scope, targetDir string, fileIdx int) (KeepStatus, 
 	}
 	_ = os.MkdirAll(targetDir, 0755)
 
-	files := t.Files()
-	var targetFile *torrent.File
-	if fileIdx >= 0 && fileIdx < len(files) {
-		targetFile = files[fileIdx]
-	} else if len(files) > 0 {
-		var maxLen int64 = -1
-		for _, f := range files {
-			if f.Length() > maxLen {
-				maxLen = f.Length()
-				targetFile = f
-			}
-		}
+	name := t.Name()
+	if targetFile != nil {
+		name = filepath.Base(targetFile.DisplayPath())
 	}
-
-	if targetFile == nil {
-		return KeepStatus{Status: "error", Message: "no files in torrent"}, errors.New("no files in torrent")
-	}
-
-	fileName := filepath.Base(targetFile.DisplayPath())
-	if scope == "all" {
-		fileName = t.Name()
-	}
-	destPath := filepath.Join(targetDir, fileName)
-
-	e.keepActive = true
-	e.keepPath = destPath
-	e.keepName = fileName
-	e.keepScope = scope
-	e.keepFile = targetFile
+	job := &keepJob{file: targetFile, name: name, path: filepath.Join(targetDir, name), done: make(chan struct{})}
+	e.keeps = append(e.keeps, job)
 
 	// Switch from read-ahead to full background download
-	if scope == "all" {
+	if targetFile == nil {
 		t.DownloadAll()
 	} else {
 		targetFile.Download()
 	}
 
 	// Start background watcher to detect when download hits 100%
-	go e.watchKeepCompletion(t, targetFile, destPath, scope)
+	go e.watchKeepCompletion(t, job)
 
-	slog.Info("keep file activated",
-		"name", fileName,
-		"dest_path", destPath,
-		"scope", scope,
-	)
-
-	done, total := keepBytes(t, targetFile, scope)
-	return KeepStatus{
-		Status:         "keeping",
-		Name:           fileName,
-		DestPath:       destPath,
-		Progress:       percent(done, total),
-		TotalBytes:     total,
-		CompletedBytes: done,
-		Scope:          scope,
-	}, nil
+	slog.Info("keep file activated", "name", name, "dest_path", job.path, "scope", scope)
+	return job.status(t, "keeping"), nil
 }
 
-func (e *Engine) watchKeepCompletion(t *torrent.Torrent, targetFile *torrent.File, destPath, scope string) {
+func (e *Engine) watchKeepCompletion(t *torrent.Torrent, job *keepJob) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -708,26 +904,27 @@ func (e *Engine) watchKeepCompletion(t *torrent.Torrent, targetFile *torrent.Fil
 		case <-ticker.C:
 		}
 
-		if done, total := keepBytes(t, targetFile, scope); done >= total {
-			e.finalizeKeep(t, targetFile, destPath, scope)
+		if done, total := keepBytes(t, job.file); done >= total {
+			e.finalizeKeep(t, job)
 			return
 		}
 	}
 }
 
-// finalizeKeep exports the completed files from the session cache to destPath. The keep is only
-// reported complete once the export finishes, so the process can't purge the cache mid-copy.
-func (e *Engine) finalizeKeep(t *torrent.Torrent, targetFile *torrent.File, destPath, scope string) {
-	files := []*torrent.File{targetFile}
-	if scope == "all" {
+// finalizeKeep exports the completed files from the session cache to the job's destination. The
+// keep is only reported complete once the export finishes, so the process can't purge the cache
+// mid-copy.
+func (e *Engine) finalizeKeep(t *torrent.Torrent, job *keepJob) {
+	files := []*torrent.File{job.file}
+	if job.file == nil {
 		files = t.Files()
 	}
 
 	failed := 0
 	for _, f := range files {
-		dst := destPath
-		if scope == "all" && t.Info().IsDir() {
-			dst = filepath.Join(destPath, filepath.FromSlash(f.DisplayPath()))
+		dst := job.path
+		if job.file == nil && t.Info().IsDir() {
+			dst = filepath.Join(job.path, filepath.FromSlash(f.DisplayPath()))
 		}
 		if err := e.exportFile(t, f, dst); err != nil {
 			slog.Error("failed to export kept file", "err", err, "dest", dst)
@@ -736,16 +933,16 @@ func (e *Engine) finalizeKeep(t *torrent.Torrent, targetFile *torrent.File, dest
 	}
 
 	e.keepMu.Lock()
-	e.keepCompleted = true
-	close(e.keepDoneChan)
+	job.completed = true
+	close(job.done)
 	e.keepMu.Unlock()
 
 	if failed > 0 {
-		SendNotification("mpv-gotorrent", fmt.Sprintf("Download finished, but %d file(s) could not be saved to %s", failed, destPath))
+		SendNotification("mpv-gotorrent", fmt.Sprintf("Download finished, but %d file(s) could not be saved to %s", failed, job.path))
 		return
 	}
-	slog.Info("keep file finished downloading to 100%", "dest", destPath)
-	SendNotification("mpv-gotorrent", fmt.Sprintf("Download complete: %s", filepath.Base(destPath)))
+	slog.Info("keep file finished downloading to 100%", "dest", job.path)
+	SendNotification("mpv-gotorrent", fmt.Sprintf("Download complete: %s", filepath.Base(job.path)))
 }
 
 // exportFile hardlinks (same filesystem) or copies a completed file out of the session cache.
@@ -822,6 +1019,7 @@ func copyFile(src, dst string) error {
 func (e *Engine) Close() error {
 	slog.Info("closing torrent engine")
 	e.closeOnce.Do(func() { close(e.done) })
+	e.freeing.Wait() // stops at its next piece once done is closed
 	var errMsgs []string
 
 	if e.ramStorage != nil {

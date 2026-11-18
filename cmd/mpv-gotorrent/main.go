@@ -36,6 +36,11 @@ type ReadyBanner struct {
 	StorageMode    string      `json:"storage_mode"`
 	Token          string      `json:"token,omitempty"`
 	Error          string      `json:"error,omitempty"`
+	Warning        string      `json:"warning,omitempty"`
+
+	// Swarm size while status is "connecting" (metadata still being fetched)
+	Peers   int `json:"peers,omitempty"`
+	Seeders int `json:"seeders,omitempty"`
 }
 
 // writeStateFile writes via a temp file and rename so the polling Lua script never reads a
@@ -98,6 +103,10 @@ func main() {
 		cacheDir     = flag.String("cache-dir", "", "Directory to store torrent cache files")
 		keepFiles    = flag.Bool("keep-files", false, "Do not delete downloaded files on exit")
 		maxRAMMB     = flag.Int("max-ram-mb", 0, "Max RAM in MB for memory-only ring buffer (0 = use disk cache)")
+		maxCached    = flag.Int("max-cached-files", 3, "Disk mode: keep only this many streamed files on disk, deleting older ones (0 = keep all until exit)")
+		maxUpKBps    = flag.Int("max-upload-kbps", 0, "Upload rate limit in KiB/s (0 = unlimited)")
+		maxDownKBps  = flag.Int("max-download-kbps", 0, "Download rate limit in KiB/s (0 = unlimited); below the video bitrate playback will stall")
+		seedRatio    = flag.Float64("seed-ratio", 0, "Stop uploading once this multiple of the downloaded data has been uploaded (0 = no cap)")
 		keepDir      = flag.String("keep-dir", "", "Default directory to save kept torrent files (default: ~/Videos)")
 		keepScope    = flag.String("keep-scope", "current", "Keep scope ('current' file or 'all' files)")
 		detachOnKeep = flag.Bool("detach-on-keep", true, "Continue downloading in background when mpv closes if kept")
@@ -154,12 +163,16 @@ func main() {
 
 	var err error
 	eng, err = engine.NewEngine(engine.Config{
-		DataDir:   *cacheDir,
-		KeepFiles: *keepFiles,
-		MaxRAMMB:  *maxRAMMB,
-		KeepDir:   *keepDir,
-		KeepScope: *keepScope,
-		Port:      0, // Random BitTorrent peer port
+		DataDir:         *cacheDir,
+		KeepFiles:       *keepFiles,
+		MaxRAMMB:        *maxRAMMB,
+		KeepDir:         *keepDir,
+		KeepScope:       *keepScope,
+		MaxCachedFiles:  *maxCached,
+		MaxUploadKBps:   *maxUpKBps,
+		MaxDownloadKBps: *maxDownKBps,
+		SeedRatio:       *seedRatio,
+		Port:            0, // Random BitTorrent peer port
 	})
 	if err != nil {
 		slog.Error("failed to initialize torrent engine", "err", err)
@@ -171,7 +184,27 @@ func main() {
 	defer metaCancel()
 
 	slog.Info("fetching torrent metadata from swarm", "source", *source)
+
+	// Report swarm size while waiting, so a dead torrent is visible before the timeout. Stopped
+	// before the ready/error banner is written so it can't overwrite it.
+	stopProgress, progressDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(progressDone)
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stopProgress:
+				return
+			case <-tick.C:
+			}
+			peers, seeders := eng.SwarmCounts()
+			writeStateFile(*stateFile, ReadyBanner{Status: "connecting", Peers: peers, Seeders: seeders})
+		}
+	}()
 	t, err := eng.AddSource(metaCtx, *source)
+	close(stopProgress)
+	<-progressDone
 	if err != nil {
 		slog.Error("failed to load torrent source", "err", err)
 		writeStateFile(*stateFile, ReadyBanner{Status: "error", Error: err.Error()})
@@ -214,6 +247,10 @@ func main() {
 		Videos:         videoFiles,
 		StorageMode:    eng.Stats().StorageMode,
 		Token:          srv.Token(),
+		Warning:        eng.DiskSpaceWarning(),
+	}
+	if banner.Warning != "" {
+		slog.Warn(banner.Warning)
 	}
 
 	slog.Info("stream ready",
@@ -252,7 +289,7 @@ func main() {
 	stopSignals()
 
 	if *detachOnKeep && eng.IsKeepActive() && !eng.IsKeepCompleted() {
-		slog.Info("detaching to complete kept download in background", "dest", eng.KeepPath())
+		slog.Info("detaching to complete kept download in background", "files", eng.KeepName())
 		engine.SendNotification("mpv-gotorrent", fmt.Sprintf("Continuing background download of %s...", eng.KeepName()))
 
 		// Release HTTP streamer port so next mpv session can use it immediately

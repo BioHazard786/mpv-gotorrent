@@ -16,6 +16,10 @@ local opts = {
     cache_dir = "",             -- Custom cache directory (blank = system default)
     keep_files = false,         -- Keep downloaded files on exit (default false = auto cleanup)
     max_ram_mb = 0,             -- Max RAM in MB for memory-only ring buffer (0 = use disk cache)
+    max_cached_episodes = 3,    -- Disk mode: keep only the last N played files on disk, deleting older ones (0 = keep all until exit)
+    max_upload_kbps = 0,        -- Upload rate limit in KiB/s (0 = unlimited)
+    max_download_kbps = 0,      -- Download rate limit in KiB/s (0 = unlimited; below the video bitrate playback stalls)
+    seed_ratio = 0,             -- Stop uploading at this multiple of what was downloaded (e.g. 1.0; 0 = no cap)
     keep_dir = "",              -- Target folder for kept files (blank = ~/Videos or ~/Downloads)
     keep_scope = "current",     -- 'current' (active video only) or 'all' (entire torrent)
     detach_on_keep = true,      -- Finish downloading kept files in background when mpv exits
@@ -142,11 +146,12 @@ local function url_encode(str)
 end
 
 -- POST to a companion endpoint asynchronously, authenticating with the session token
-local function companion_post(url, callback)
+local function companion_post(url, callback, server)
+    server = server or current_server
     local args = {"curl", "-s", "-X", "POST"}
-    if current_server and current_server.token then
+    if server and server.token then
         table.insert(args, "-H")
-        table.insert(args, "X-Gotorrent-Token: " .. current_server.token)
+        table.insert(args, "X-Gotorrent-Token: " .. server.token)
     end
     table.insert(args, url)
     mp.command_native_async({
@@ -258,8 +263,58 @@ local function stop_active_companion()
     end
 end
 
--- Launch companion process and poll state file asynchronously (non-blocking)
-local function launch_companion(source, hook, callback)
+-- A torrent with no peers just buffers forever once its metadata is known (a .torrent file or
+-- cached metainfo resolves instantly), so say so instead of leaving the user guessing.
+local NO_PEERS_WARN_AFTER = 30
+local function warn_if_no_peers(server)
+    mp.add_timeout(NO_PEERS_WARN_AFTER, function()
+        if current_server ~= server then return end
+        mp.command_native_async({
+            name = "subprocess",
+            playback_only = false,
+            capture_stdout = true,
+            args = {"curl", "-s", server.base_url .. "/status"},
+        }, function(success, res)
+            if not success or not res or res.status ~= 0 or current_server ~= server then return end
+            local stats = utils.parse_json(res.stdout or "")
+            if stats and (stats.peers or 0) == 0 and (stats.progress or 0) < 100 then
+                msg.warn("No peers connected after " .. NO_PEERS_WARN_AFTER .. "s")
+                mp.osd_message(string.format(
+                    "mpv-gotorrent: No peers found after %ds.\nThis torrent may be dead.", NO_PEERS_WARN_AFTER), 6)
+            end
+        end)
+    end)
+end
+
+-- Make a ready companion (the banner it wrote) the one the rest of the script talks to
+local function adopt_companion(parsed)
+    current_server = {
+        port = parsed.port,
+        base_url = parsed.base_url,
+        token = parsed.token,
+        infohash = parsed.infohash and parsed.infohash:lower(),
+    }
+    active_torrent = {
+        name = parsed.name,
+        infohash = current_server.infohash,
+        total_size = parsed.total_size,
+        videos = parsed.videos or {},
+        videos_count = parsed.videos_count or 0,
+    }
+    warn_if_no_peers(current_server)
+    if parsed.warning and parsed.warning ~= "" then
+        msg.warn(parsed.warning)
+        mp.osd_message("mpv-gotorrent: " .. parsed.warning, 8)
+    end
+end
+
+-- Companions started ahead of time for torrents queued behind the current file, by source.
+-- An entry is {} while connecting, then {data = banner}; `waiting` is set if its entry loads first.
+local preloaded = {}
+
+-- Launch companion process and poll state file asynchronously (non-blocking).
+-- quiet: log failures without an on-screen message (background preloads).
+local function launch_companion(source, callback, quiet)
     local bin_path = locate_binary()
     local my_pid = mp.get_property_number("pid") or 0
 
@@ -286,6 +341,20 @@ local function launch_companion(source, hook, callback)
     end
     if opts.max_ram_mb and opts.max_ram_mb > 0 then
         table.insert(args, "--max-ram-mb=" .. tostring(opts.max_ram_mb))
+    end
+    -- Only when changed from the companion's default (3), so an older binary without the flag still starts
+    if opts.max_cached_episodes ~= 3 then
+        table.insert(args, "--max-cached-files=" .. tostring(opts.max_cached_episodes))
+    end
+    -- Only passed when set, so an older companion binary without these flags still starts
+    if opts.max_upload_kbps > 0 then
+        table.insert(args, "--max-upload-kbps=" .. tostring(math.floor(opts.max_upload_kbps)))
+    end
+    if opts.max_download_kbps > 0 then
+        table.insert(args, "--max-download-kbps=" .. tostring(math.floor(opts.max_download_kbps)))
+    end
+    if opts.seed_ratio > 0 then
+        table.insert(args, "--seed-ratio=" .. tostring(opts.seed_ratio))
     end
     if opts.keep_dir and opts.keep_dir ~= "" then
         table.insert(args, "--keep-dir=" .. opts.keep_dir)
@@ -331,24 +400,19 @@ local function launch_companion(source, hook, callback)
                 local parsed = utils.parse_json(content)
                 if parsed and parsed.status == "ready" then
                     cleanup_poll()
-                    current_server = {
-                        port = parsed.port,
-                        base_url = parsed.base_url,
-                        token = parsed.token,
-                        infohash = parsed.infohash and parsed.infohash:lower(),
-                    }
-                    active_torrent = {
-                        name = parsed.name,
-                        infohash = parsed.infohash and parsed.infohash:lower(),
-                        total_size = parsed.total_size,
-                        videos = parsed.videos or {},
-                        videos_count = parsed.videos_count or 0,
-                    }
                     callback(true, parsed)
                     return
+                elseif parsed and parsed.status == "connecting" then
+                    -- Swarm size while metadata is fetched; 0 peers for long means a dead torrent
+                    if not quiet and opts.show_osd then
+                        mp.osd_message(string.format("mpv-gotorrent: Connecting to swarm... %d peers (%d seeders)",
+                            parsed.peers or 0, parsed.seeders or 0), 2)
+                    end
                 elseif parsed and parsed.status == "error" then
                     cleanup_poll()
-                    mp.osd_message("mpv-gotorrent error: " .. (parsed.error or "unknown"), 5)
+                    if not quiet then
+                        mp.osd_message("mpv-gotorrent error: " .. (parsed.error or "unknown"), 5)
+                    end
                     msg.error("Companion error: " .. (parsed.error or "unknown"))
                     callback(false, parsed.error)
                     return
@@ -358,7 +422,9 @@ local function launch_companion(source, hook, callback)
 
         if mp.get_time() - start_time > (opts.timeout or 60) then
             cleanup_poll()
-            mp.osd_message("mpv-gotorrent: Metadata fetch timed out.", 5)
+            if not quiet then
+                mp.osd_message("mpv-gotorrent: Metadata fetch timed out.", 5)
+            end
             msg.error("Timed out waiting for torrent metadata.")
             callback(false, "timeout")
             return
@@ -375,8 +441,11 @@ mp.add_hook("on_load", 10, function(hook)
     -- 1. Check if this is an existing stream URL being resumed (e.g. from history, bookmark, or watch-later)
     local resume_hash = extract_resume_infohash(raw_url)
     if resume_hash then
-        -- If companion is already active for this infohash, proceed immediately
+        -- If companion is already active for this infohash, proceed immediately. The entry may
+        -- still carry the port of an earlier session (a resumed history entry), so point it here.
         if current_server and current_server.infohash == resume_hash then
+            mp.set_property("stream-open-filename",
+                (raw_url:gsub("^https?://127%.0%.0%.1:%d+", function() return current_server.base_url end)))
             return
         end
 
@@ -388,12 +457,42 @@ mp.add_hook("on_load", 10, function(hook)
         hook:defer()
         stop_active_companion()
 
-        launch_companion(resume_hash, hook, function(success, data)
+        launch_companion(resume_hash, function(success, data)
             if success then
+                adopt_companion(data)
                 msg.info("Companion reconnected for infohash: " .. resume_hash)
                 -- The new companion may have bound a different port than the saved URL
                 local new_url = raw_url:gsub("^https?://127%.0%.0%.1:%d+", function() return data.base_url end)
                 mp.set_property("stream-open-filename", new_url)
+
+                -- History/watch-later hands us just one episode; restore the rest of the pack
+                -- around it once it is loaded, so prev/next keep working.
+                local _, resumed_idx = stream_location(new_url)
+                local videos = data.videos or {}
+                if opts.auto_playlist and resumed_idx and #videos > 1 then
+                    local function restore_playlist()
+                        mp.unregister_event(restore_playlist)
+                        -- Skip if the episode failed to load and this is some later file
+                        if current_stream_index() ~= resumed_idx then return end
+                        if mp.get_property_number("playlist-count", 0) ~= 1 then return end
+                        -- videos is in playlist order, which can differ from torrent file order
+                        -- append + playlist-move instead of loadfile insert-at, which needs mpv 0.38+
+                        local before, seen = 0, false
+                        for _, v in ipairs(videos) do
+                            if v.index == resumed_idx then
+                                seen = true
+                            else
+                                mp.commandv("loadfile", v.stream_url, "append")
+                                if not seen then
+                                    local last = mp.get_property_number("playlist-count", 1) - 1
+                                    mp.commandv("playlist-move", tostring(last), tostring(before))
+                                    before = before + 1
+                                end
+                            end
+                        end
+                    end
+                    mp.register_event("file-loaded", restore_playlist)
+                end
             end
             hook:cont()
         end)
@@ -414,11 +513,24 @@ mp.add_hook("on_load", 10, function(hook)
     hook:defer()
     stop_active_companion()
 
-    launch_companion(source, hook, function(success, data)
+    -- Reuse the companion preloaded for this entry, or start one
+    local function get_companion(callback)
+        local pre = preloaded[source]
+        if not pre then return launch_companion(source, callback) end
+        if pre.data then
+            preloaded[source] = nil
+            callback(true, pre.data)
+        else
+            pre.waiting = callback
+        end
+    end
+
+    get_companion(function(success, data)
         if not success or not data then
             hook:cont()
             return
         end
+        adopt_companion(data)
 
         local videos = data.videos or {}
         if #videos == 0 and not data.first_stream_url then
@@ -432,7 +544,7 @@ mp.add_hook("on_load", 10, function(hook)
         if opts.auto_playlist and data.m3u_playlist and data.m3u_playlist ~= "" then
             msg.info("Ingesting torrent playlist via memory:// M3U demuxer")
             mp.set_property("stream-open-filename", "memory://" .. data.m3u_playlist)
-            if opts.show_osd and #videos > 1 then
+            if opts.show_osd and #videos > 1 and not data.warning then
                 mp.osd_message(string.format("Torrent loaded: %d episodes added to playlist", #videos), 4)
             end
         else
@@ -496,23 +608,82 @@ mp.observe_property("duration", "number", function(_, duration)
     companion_post(string.format("%s/media?file_idx=%d&duration=%.3f", current_server.base_url, idx, duration))
 end)
 
--- Prefetch the opening of the next playlist entry once the current one is far enough along,
--- so the next episode starts without waiting for the swarm
-local prefetched_path = nil
-mp.observe_property("percent-pos", "number", function(_, pct)
-    if not pct or opts.prefetch_next_at <= 0 or pct < opts.prefetch_next_at then return end
-    local path = mp.get_property("path")
-    if path == prefetched_path or not current_stream_index() then return end
-    prefetched_path = path
+-- Warm up the next playlist entry once the current one is far enough along, so it starts without
+-- waiting for the swarm. Next file of the same torrent: prefetch its opening. A different torrent
+-- (magnet/.torrent added to the playlist): start its companion now and prefetch its first file.
+local handled_next = nil
+
+-- Stop preloaded companions whose torrent is no longer the next playlist entry (removed, skipped
+-- past, or the playlist was replaced), so they don't keep using peers and bandwidth all session.
+-- A preload whose entry is already loading and waiting on it is left alone.
+local function drop_preloads(keep_source)
+    for src, pre in pairs(preloaded) do
+        if src ~= keep_source and not pre.waiting then
+            msg.info("Stopping preloaded companion: " .. src)
+            preloaded[src] = nil
+            pre.cancelled = true
+            handled_next = nil -- so re-adding the same entry preloads it again
+            if pre.data then
+                companion_post(pre.data.base_url .. "/shutdown", nil, pre.data)
+            end
+        end
+    end
+end
+
+local function prefetch_next()
+    -- Unavailable between files; the entry being loaded may still need its preload then
+    local pct = mp.get_property_number("percent-pos")
+    if not pct then return end
 
     local pos = mp.get_property_number("playlist-pos", -1)
     if pos < 0 then return end
-    local next_hash, next_idx = stream_location(mp.get_property("playlist/" .. (pos + 1) .. "/filename"))
-    if not next_hash or next_hash ~= current_server.infohash then return end
+    local next_path = mp.get_property("playlist/" .. (pos + 1) .. "/filename")
+    local source = next_path and extract_torrent_source(next_path)
+    drop_preloads(source)
 
-    msg.info(string.format("Prefetching next episode (file %d)", next_idx))
-    companion_post(string.format("%s/prefetch?file_idx=%d", current_server.base_url, next_idx))
-end)
+    if opts.prefetch_next_at <= 0 or pct < opts.prefetch_next_at then return end
+    local key = mp.get_property("path", "") .. "\0" .. tostring(next_path)
+    if not next_path or key == handled_next then return end
+    handled_next = key
+
+    local next_hash, next_idx = stream_location(next_path)
+    if next_hash then
+        if current_stream_index() and next_hash == current_server.infohash then
+            msg.info(string.format("Prefetching next episode (file %d)", next_idx))
+            companion_post(string.format("%s/prefetch?file_idx=%d", current_server.base_url, next_idx))
+        end
+        return
+    end
+
+    if not source or preloaded[source] then return end
+    msg.info("Preloading next torrent: " .. source)
+    local pre = {}
+    preloaded[source] = pre
+    launch_companion(source, function(success, data)
+        if pre.waiting then
+            preloaded[source] = nil
+            -- The preload was quiet, but now the user is waiting on it
+            if not success then mp.osd_message("mpv-gotorrent error: " .. tostring(data), 5) end
+            return pre.waiting(success, data)
+        end
+        if pre.cancelled then
+            if success then companion_post(data.base_url .. "/shutdown", nil, data) end
+            return
+        end
+        if not success then
+            preloaded[source] = nil
+            return
+        end
+        pre.data = data
+        local first = data.videos and data.videos[1]
+        if first then
+            companion_post(string.format("%s/prefetch?file_idx=%d", data.base_url, first.index), nil, data)
+        end
+    end, true)
+end
+mp.observe_property("percent-pos", "number", prefetch_next)
+-- Entries added after the threshold was passed
+mp.observe_property("playlist-count", "number", prefetch_next)
 
 -- Refresh and render ASS styled OSD overlay (key_stats)
 local function refresh_osd_overlay()
@@ -566,8 +737,11 @@ local function refresh_osd_overlay()
 
         local keep_line = ""
         if stats.keep_active then
-            local keep_dest = stats.keep_path or "~/Videos"
-            keep_line = string.format("Keep:      " .. c_green .. "Saving to %s (%.1f%%)" .. c_white .. "\\N",
+            local keep_dest = "to " .. (stats.keep_path or "~/Videos")
+            if (stats.keep_count or 1) > 1 then
+                keep_dest = string.format("%d files, latest %s", stats.keep_count, keep_dest)
+            end
+            keep_line = string.format("Keep:      " .. c_green .. "Saving %s (%.1f%%)" .. c_white .. "\\N",
                 keep_dest,
                 stats.keep_progress or 0
             )
@@ -580,7 +754,7 @@ local function refresh_osd_overlay()
             "%s" ..
             "%s" ..
             "Speed:     " .. c_cyan .. "↓ %s" .. c_white .. "   " .. c_green .. "↑ %s" .. c_white .. "\\N" ..
-            "Swarm:     Peers: %d (Active: %d)\\N" ..
+            "Swarm:     Peers: %d (Active: %d, Seeders: %d)%s\\N" ..
             "Progress:  " .. c_green .. "%s %.1f%%" .. c_white .. "\\N" ..
             "Pieces:    %d / %d (%s / %s)",
             style_header,
@@ -591,6 +765,8 @@ local function refresh_osd_overlay()
             format_speed(stats.upload_speed or 0),
             stats.peers or 0,
             stats.active_peers or 0,
+            stats.seeders or 0,
+            stats.upload_paused and "  [upload paused: seed ratio]" or "",
             bar,
             stats.progress or 0,
             stats.pieces_done or 0,

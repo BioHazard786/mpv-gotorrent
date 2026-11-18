@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Install mpv, ffmpeg and Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mpv ffmpeg lua5.4
+
+      - name: Vet and unit tests
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Cross-compile release targets
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build -o /dev/null ./cmd/mpv-gotorrent
+          done
+
+      - name: Check Lua and JavaScript syntax
+        run: |
+          luac5.4 -p scripts/main.lua
+          node --check iina-plugin/main.js
+          node --check iina-plugin/global.js
+          python3 -m json.tool iina-plugin/Info.json > /dev/null
+
+      - name: Headless mpv smoke test
+        run: test/smoke/run.sh

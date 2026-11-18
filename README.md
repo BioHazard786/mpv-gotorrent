@@ -8,7 +8,7 @@ Stream BitTorrent files and magnet links directly inside **mpv** with **zero set
 
 - ⚡ **Zero Setup & Self-Contained**: Single static companion binary + Lua script. Starts when mpv opens and closes automatically when you exit.
 - 💾 **RAM-Only Ring Buffer (Zero SSD Wear)**: Stream 40GB+ remuxes completely in RAM with zero disk writes using an intelligent LRU piece cache and header/tail cue pinning. Protects SSD write endurance (TBW).
-- 📥 **"Keep File" Hotkey (<kbd>Ctrl</kbd> + <kbd>k</kbd>)**: Save what you're watching permanently on the fly without restarting. Downloads the full file into your library (`~/Videos`) and finishes in the background if mpv closes. Available in disk mode (RAM mode never writes to disk).
+- 📥 **"Keep File" Hotkey (<kbd>Ctrl</kbd> + <kbd>k</kbd>)**: Save what you're watching permanently on the fly without restarting. Downloads the full file into your library (`~/Videos`) and finishes in the background if mpv closes. Press it again on another episode of a pack to save that one too. Available in disk mode (RAM mode never writes to disk).
 - 🚀 **Instant Playback & DHT Persistence**: Automatically persists DHT routing nodes across sessions (`dht.nodes`), reducing swarm discovery and metadata resolution from 15 seconds to under 2 seconds.
 - 🌐 **Built-in Public Tracker Boost**: Injects top high-uptime public UDP/IP trackers (auto-cached from `ngosang/trackerslist`) into every magnet to revive dead or slow torrents without DNS bottlenecks.
 - 🔄 **Full Resume & History**: Remembers your playback position (`watch_later`) and seamlessly integrates with mpv history scripts (`SimpleHistory`, `uosc`, `memo`).
@@ -151,6 +151,18 @@ You can customize settings by creating `gotorrent.conf` in your mpv `script-opts
 # Ctrl+k (Keep) is unavailable in RAM mode
 max_ram_mb=0
 
+# Disk mode: keep only the last N played episodes on disk, deleting older ones as you go
+# (default: 3, 0 = keep everything until mpv exits). Episodes you keep with Ctrl+k are never deleted.
+max_cached_episodes=3
+
+# Upload / download rate limits in KiB/s (default: 0 = unlimited).
+# A download limit below the video's bitrate makes playback stall.
+max_upload_kbps=0
+max_download_kbps=0
+
+# Stop uploading once you've shared this multiple of what you downloaded, e.g. 1.0 (default: 0 = no cap)
+seed_ratio=0
+
 # Save location when pressing Ctrl+k (blank = ~/Videos or ~/Downloads)
 keep_dir=
 
@@ -174,7 +186,8 @@ timeout=60
 # Automatically queue multi-file torrents as a playlist (default: true)
 auto_playlist=true
 
-# Start downloading the next episode's opening at this % of the current one (default: 80, 0 = off)
+# Start downloading the next episode's opening at this % of the current one (default: 80, 0 = off).
+# If the next playlist entry is another magnet/.torrent, it is also connected and prefetched then.
 prefetch_next_at=80
 
 # Show on-screen messages when connecting and resolving metadata (default: true)

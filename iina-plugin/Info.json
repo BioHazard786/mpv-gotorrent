@@ -1,7 +1,7 @@
 {
   "name": "mpv-gotorrent",
   "identifier": "io.github.biohazard786.gotorrent",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "ghRepo": "biohazard786/mpv-gotorrent",
   "ghVersion": 2,
   "description": "Stream BitTorrent magnet links & torrents directly inside IINA with zero SSD wear",
@@ -25,7 +25,11 @@
     "timeout": 60,
     "keep_dir": "",
     "keep_scope": "current",
-    "auto_playlist": true
+    "auto_playlist": true,
+    "max_cached_files": 3,
+    "max_upload_kbps": 0,
+    "max_download_kbps": 0,
+    "seed_ratio": 0
   },
   "sidebarTab": {
     "name": "BitTorrent",
