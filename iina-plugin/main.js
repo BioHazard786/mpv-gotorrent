@@ -351,22 +351,28 @@ mpv.addHook("on_load", 10, async (next) => {
 // IINA's docs and source disagree on the event name, so listen to both and dedupe.
 let lastLoad = { path: null, at: 0 };
 
+// Append companion streams to the playlist through an M3U, so the entries get clean titles like
+// the playlist built on first load, instead of showing raw stream URLs
+function appendTitled(videos) {
+  if (videos.length === 0) return;
+  const lines = ["#EXTM3U"];
+  for (const v of videos) {
+    lines.push(`#EXTINF:-1,${v.name.replace(/\.[^/.]+$/, "")}`, v.stream_url);
+  }
+  mpv.command("loadlist", ["memory://" + lines.join("\n") + "\n", "append"]);
+}
+
 // Rebuild a resumed episode's pack around it. videos is in playlist order, which can differ from
 // torrent file order. append + playlist-move works on every mpv; loadfile insert-at needs 0.38+.
 function restorePlaylist(resumedIdx, videos) {
-  let before = 0;
-  let seen = false;
-  for (const v of videos) {
-    if (v.index === resumedIdx) {
-      seen = true;
-      continue;
-    }
-    mpv.command("loadfile", [v.stream_url, "append"]);
-    if (!seen) {
-      mpv.command("playlist-move", [String(mpv.getNumber("playlist-count") - 1), String(before)]);
-      before++;
-    }
+  const at = videos.findIndex((v) => v.index === resumedIdx);
+  if (at < 0) return;
+  const before = videos.slice(0, at);
+  appendTitled(before);
+  for (let i = 0; i < before.length; i++) {
+    mpv.command("playlist-move", [String(i + 1), String(i)]);
   }
+  appendTitled(videos.slice(at + 1));
 }
 
 function onFileLoaded() {

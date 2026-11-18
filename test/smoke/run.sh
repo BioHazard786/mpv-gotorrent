@@ -18,7 +18,8 @@ clip() { ffmpeg -loglevel error -y -f lavfi -i testsrc=size=160x120:rate=10:dura
     -f lavfi -i sine=duration="$2" -c:v libx264 -c:a aac -shortest "$1"; }
 clip "$work/cache/moviea.mkv" 8
 clip "$work/cache/movieb.mkv" 8
-for e in E1 E2 E10; do clip "$work/cache/Pack/$e.mkv" 4; done
+# Longer than the probe waits before reading the playlist, so the episode is still current
+for e in E1 E2 E10; do clip "$work/cache/Pack/$e.mkv" 12; done
 pack_hash="$(python3 "$repo/test/smoke/make_fixtures.py" "$work")"
 
 failed=0
@@ -49,7 +50,8 @@ grep -E "^\[probe\] PL" "$work/pack.log" | sed 's/.*PL //; s/ \*//' | tr '\n' ' 
 
 run_mpv "$work/resume.log" "" "http://127.0.0.1:9999/torrent/$pack_hash/2/E2.mkv"
 check "resume from history restores the pack around the episode" "$work/resume.log" \
-    "Companion reconnected" "PL E1.mkv$" "PL E2.mkv \*" "PL E10.mkv$"
+    "Companion reconnected" "PL E1.mkv$" "PL E2.mkv \*" "PL E10.mkv$" \
+    "TITLE E1$" "TITLE E10$" # restored entries show clean titles, not raw stream URLs
 grep -E "^\[probe\] PL" "$work/resume.log" | sed 's/.*PL //; s/ \*//' | tr '\n' ' ' | grep -q "^E1.mkv E2.mkv E10.mkv $" \
     || { echo "FAIL resume order"; failed=1; }
 

@@ -60,6 +60,18 @@ local function strip_extension(filename)
     return (filename:gsub("%.%w+$", ""))
 end
 
+-- Append companion streams to the playlist through an M3U, so the entries get clean titles like
+-- the playlist built on first load, instead of showing raw stream URLs
+local function append_titled(videos)
+    if #videos == 0 then return end
+    local lines = {"#EXTM3U"}
+    for _, v in ipairs(videos) do
+        table.insert(lines, "#EXTINF:-1," .. strip_extension(v.name))
+        table.insert(lines, v.stream_url)
+    end
+    mp.commandv("loadlist", "memory://" .. table.concat(lines, "\n") .. "\n", "append")
+end
+
 -- Detect if a URL is an internal gotorrent stream endpoint
 local function extract_resume_infohash(url)
     if not url or url == "" then return nil end
@@ -476,20 +488,20 @@ mp.add_hook("on_load", 10, function(hook)
                         if current_stream_index() ~= resumed_idx then return end
                         if mp.get_property_number("playlist-count", 0) ~= 1 then return end
                         -- videos is in playlist order, which can differ from torrent file order
-                        -- append + playlist-move instead of loadfile insert-at, which needs mpv 0.38+
-                        local before, seen = 0, false
+                        local before, after, seen = {}, {}, false
                         for _, v in ipairs(videos) do
                             if v.index == resumed_idx then
                                 seen = true
                             else
-                                mp.commandv("loadfile", v.stream_url, "append")
-                                if not seen then
-                                    local last = mp.get_property_number("playlist-count", 1) - 1
-                                    mp.commandv("playlist-move", tostring(last), tostring(before))
-                                    before = before + 1
-                                end
+                                table.insert(seen and after or before, v)
                             end
                         end
+                        -- append + playlist-move instead of loadfile insert-at, which needs mpv 0.38+
+                        append_titled(before)
+                        for i = 0, #before - 1 do
+                            mp.commandv("playlist-move", tostring(i + 1), tostring(i))
+                        end
+                        append_titled(after)
                     end
                     mp.register_event("file-loaded", restore_playlist)
                 end

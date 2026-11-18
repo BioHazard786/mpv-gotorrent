@@ -8,6 +8,7 @@ if mode == "dump" then
         for i = 0, mp.get_property_number("playlist-count", 0) - 1 do
             local name = mp.get_property("playlist/" .. i .. "/filename"):match("([^/]+)$")
             print("PL " .. name .. (mp.get_property_bool("playlist/" .. i .. "/current") and " *" or ""))
+            print("TITLE " .. (mp.get_property("playlist/" .. i .. "/title") or "-"))
         end
         mp.command("quit")
     end)
